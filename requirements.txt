@@ -1,0 +1,6 @@
+pandas>=2.2
+xlsxwriter>=3.2
+python-calamine>=0.2
+openpyxl>=3.1
+pywin32>=306        # solo para verificar_libro.py (Excel vía COM)
+pyinstaller>=6.0    # solo para compilar el .exe

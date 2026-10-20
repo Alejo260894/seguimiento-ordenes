@@ -1,0 +1,21 @@
+# Data de la empresa: reportes SAP, controles generados y seguimiento (NO subir)
+*.csv
+*.xlsx
+*.xls
+*.db
+*.db-journal
+Cargas/
+config_seguimiento.json
+ultima_carga.log
+~tmp_control_*
+
+# Ejecutable y artefactos de compilación (publicar el .exe como Release si hace falta)
+*.exe
+build/
+dist/
+*.spec
+
+# Python
+__pycache__/
+*.pyc
+.venv/
