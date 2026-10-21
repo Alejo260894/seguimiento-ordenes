@@ -70,6 +70,19 @@ Colores de la lista:
 
 Si eliges el estado **"Cerrar sin factura"**, la OC deja de estar activa. Úsalo cuando ya sabes que una OC en proceso no se va a facturar, aunque todavía no esté cerrada en SAP.
 
+**🚦 Semáforo de plazos**: cada pendiente se colorea según su plazo y tiene una columna **Plazo** y un filtro.
+
+| Lista | Qué se mide | Amarillo (atención) | Rojo (atrasado) |
+|---|---|---|---|
+| Requerimientos | Días en la etapa actual | Según la etapa (ej. «Valo en aprobación»: 2 días) | Según la etapa (ej. 5 días) |
+| OC sin factura | Días desde la fecha de la OC | 30 días | 60 días, o compromiso vencido |
+| Facturas pendientes | Días al vencimiento | Vence en 7 días o menos | Vencida |
+
+- Los umbrales se cambian en **⚙ Plazos…**. Los valores iniciales salen de tus tiempos actuales: de la solicitud al envío de la OC la mediana es 4 días.
+- **🚦 Pendientes de hoy** se abre al iniciar la app (se puede desactivar). Muestra cuántos pendientes están atrasados y cuántos en atención en cada lista, y lo más atrasado hasta el envío de la OC. **Ver →** te lleva a la lista ya filtrada.
+- En **Indicadores** y en el Excel exportado (columna PLAZO y hoja PENDIENTES) aparecen los atrasados y en atención por etapa.
+- En «OC sin factura», las OC sin comentarios ahora se ven en **negrita**: el fondo de color queda para el semáforo.
+
 **F5** actualiza la vista. Si una carga programada actualizó la base mientras la app estaba abierta, la vista se refresca sola al volver a la ventana.
 
 Archivos de la aplicación (deben quedarse junto al `.exe`):

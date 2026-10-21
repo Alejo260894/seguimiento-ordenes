@@ -10,10 +10,12 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 import requerimientos as rq
+import semaforo as sem
 
 COLS_REQ = [("id", "COD", 50, "e"), ("f_solic", "F. Solic.", 80, "center"), ("proyecto", "Proyecto", 80, "w"),
             ("referencia", "Referencia", 95, "w"), ("tipo", "Tipo", 50, "center"), ("proveedor", "Proveedor", 220, "w"),
-            ("etapa", "Etapa", 165, "w"), ("dias_etapa", "Días etapa", 70, "e"), ("monto", "Monto", 90, "e"),
+            ("etapa", "Etapa", 165, "w"), ("dias_etapa", "Días etapa", 70, "e"), ("plazo", "Plazo", 75, "center"),
+            ("monto", "Monto", 90, "e"),
             ("moneda", "Mon", 45, "center"), ("orden", "Orden", 85, "e"), ("sap_estado", "Estado OC SAP", 95, "w"),
             ("controller", "Controller", 180, "w"), ("estatus", "Estatus", 120, "w"),
             ("com_oc", "Último comentario OC", 260, "w")]
@@ -438,10 +440,12 @@ def construir(app, tab_req, tab_ind):
     app.vr_tipo = app._combo(f1, "Tipo:", ["Todos"] + rq.TIPOS, 8, lambda: pintar_req(app))
     app.vr_controller = app._combo(f1, "Controller:", ["Todos"], 26, lambda: pintar_req(app))
     app.vr_mes = app._combo(f1, "Mes solicitud:", ["Todos"], 9, lambda: pintar_req(app))
+    app.vr_semaforo = app._combo(f1, "Plazo:", sem.FILTROS, 18, lambda: pintar_req(app))
     app.lbl_resumen_req = ttk.Label(tab_req, padding=(6, 0, 6, 4), foreground="#404040")
     app.lbl_resumen_req.pack(fill="x")
     app.tree_req = app._tabla(tab_req, COLS_REQ, lambda k: ordenar_req(app, k), ("proveedor", "com_oc"))
-    app.tree_req.tag_configure("hasta_oc", background="#FFF2CC")
+    for nivel, color in sem.FONDO.items():
+        app.tree_req.tag_configure(nivel, background=color)
     app.tree_req.tag_configure("pagado", background="#E2EFDA")
     app.tree_req.tag_configure("cerrado", foreground="#808080")
     app.tree_req.bind("<Double-1>", lambda e: editar(app))
@@ -457,9 +461,11 @@ def construir(app, tab_req, tab_ind):
     ttk.Button(fi, text="📤  Exportar Excel", command=lambda: exportar(app)).pack(side="right")
     ttk.Label(tab_ind, text="Pendientes por etapa (las etapas resaltadas son el seguimiento hasta el envío de la OC)",
               font=("Segoe UI", 10, "bold"), padding=(6, 4)).pack(fill="x")
-    app.tree_pend = ttk.Treeview(tab_ind, columns=("etapa", "n", "prom", "max", "pen", "usd"), show="headings", height=11)
-    for k, t, w, a in [("etapa", "Etapa", 260, "w"), ("n", "N°", 70, "e"), ("prom", "Días promedio en etapa", 160, "e"),
-                       ("max", "Máx. días", 100, "e"), ("pen", "Monto PEN", 140, "e"), ("usd", "Monto USD", 140, "e")]:
+    app.tree_pend = ttk.Treeview(tab_ind, columns=("etapa", "n", "rojo", "amarillo", "prom", "max", "pen", "usd"),
+                                 show="headings", height=11)
+    for k, t, w, a in [("etapa", "Etapa", 260, "w"), ("n", "N°", 60, "e"), ("rojo", "Atrasados", 80, "e"),
+                       ("amarillo", "En atención", 85, "e"), ("prom", "Días promedio en etapa", 150, "e"),
+                       ("max", "Máx. días", 80, "e"), ("pen", "Monto PEN", 130, "e"), ("usd", "Monto USD", 130, "e")]:
         app.tree_pend.heading(k, text=t)
         app.tree_pend.column(k, width=w, anchor=a, stretch=False)
     app.tree_pend.tag_configure("hasta_oc", background="#FFF2CC")
@@ -494,8 +500,12 @@ def refrescar(app):
 def filtradas_req(app):
     q = app.vr_buscar.get().strip().lower()
     et, tp, ct, mes = app.vr_etapa.get(), app.vr_tipo.get(), app.vr_controller.get(), app.vr_mes.get()
+    u, plazo = sem.umbrales(app.cfg), app.vr_semaforo.get()
     out = []
     for f in app.filas_req:
+        f["nivel"] = sem.nivel_req(f, u)
+        if not sem.pasa_filtro(f["nivel"], plazo):
+            continue
         if et == "Pendientes hasta envío de OC" and f["etapa"] not in rq.ETAPAS_HASTA_OC:
             continue
         if et == "Abiertos (todos)" and f["etapa"] in rq.CERRADAS:
@@ -521,23 +531,35 @@ def pintar_req(app):
     filas = filtradas_req(app)
     clave, desc = app.orden_req
     num = {"id", "dias_etapa", "monto", "orden"}
-    filas.sort(key=(lambda f: (f[clave] is None, f[clave] or 0)) if clave in num else (lambda f: str(f.get(clave) or "").lower()),
-               reverse=desc)
+    if clave == "plazo":
+        orden_nivel = {sem.ROJO: 0, sem.AMARILLO: 1, sem.VERDE: 2}
+        llave = lambda f: (orden_nivel.get(f["nivel"], 3), -(f["dias_etapa"] or 0))
+    elif clave in num:
+        llave = lambda f: (f[clave] is None, f[clave] or 0)
+    else:
+        llave = lambda f: str(f.get(clave) or "").lower()
+    filas.sort(key=llave, reverse=desc)
     t = app.tree_req
     sel = t.selection()
     t.delete(*t.get_children())
     for f in filas:
         tag = ("pagado",) if f["etapa"] == "Pagado" else ("cerrado",) if f["etapa"] in rq.CERRADAS else \
-              ("hasta_oc",) if f["etapa"] in rq.ETAPAS_HASTA_OC else ()
+              (f["nivel"],) if f["nivel"] in sem.FONDO else ()
         t.insert("", "end", iid=str(f["id"]), tags=tag, values=(
             f"{f['id']:03d}", rq.fmt(f["f_solic"]), f["proyecto"], f["referencia"], f["tipo"], f["proveedor"], f["etapa"],
-            "" if f["dias_etapa"] is None else f["dias_etapa"], "" if f["monto"] is None else f"{f['monto']:,.2f}",
+            "" if f["dias_etapa"] is None else f["dias_etapa"], sem.texto(f["nivel"]),
+            "" if f["monto"] is None else f"{f['monto']:,.2f}",
             f["moneda"], f["orden"] or "", f["sap_estado"], f["controller"], f["estatus"], f["com_oc"].replace("\n", " ")))
     if sel and t.exists(sel[0]):
         t.selection_set(sel[0])
+    u = sem.umbrales(app.cfg)
     abiertos = [f for f in app.filas_req if f["etapa"] not in rq.CERRADAS]
-    hasta = " · ".join(f"{e}: {sum(1 for f in abiertos if f['etapa'] == e)}" for e in rq.ETAPAS_HASTA_OC)
-    app.lbl_resumen_req.config(text=f"Mostrando {len(filas)}   |   Abiertos: {len(abiertos)}   |   Hasta envío de OC → {hasta}")
+    hasta = [f for f in abiertos if f["etapa"] in rq.ETAPAS_HASTA_OC]
+    rojos = sum(1 for f in hasta if sem.nivel_req(f, u) == sem.ROJO)
+    amar = sum(1 for f in hasta if sem.nivel_req(f, u) == sem.AMARILLO)
+    app.lbl_resumen_req.config(text=f"Mostrando {len(filas)}   |   Abiertos: {len(abiertos)}   |   Hasta envío de OC: "
+                                    f"{len(hasta)} (atrasados {rojos}, en atención {amar})   ·   colores: rojo = atrasado, "
+                                    f"amarillo = atención (umbrales en «⚙ Plazos…»)")
 
 
 def ordenar_req(app, clave):
@@ -551,16 +573,25 @@ def pintar_ind(app):
              if (tp == "Todos" or f["tipo"] == tp) and (ct == "Todos" or f["controller"] == ct)
              and (d == "Todos" or (f["f_solic"] or "")[:7] >= d) and (h == "Todos" or (f["f_solic"] or "9999")[:7] <= h)]
     pend, tiempos = rq.indicadores(filas)
+    u = sem.umbrales(app.cfg)
+    niveles = {}
+    for f in filas:
+        n = sem.nivel_req(f, u)
+        if n in (sem.ROJO, sem.AMARILLO):
+            niveles[(f["etapa"], n)] = niveles.get((f["etapa"], n), 0) + 1
     t = app.tree_pend
     t.delete(*t.get_children())
-    n_oc = 0
+    n_oc = r_oc = a_oc = 0
     for p in pend:
-        n_oc += p["n"] if p["hasta_oc"] else 0
+        rojos, amar = niveles.get((p["etapa"], sem.ROJO), 0), niveles.get((p["etapa"], sem.AMARILLO), 0)
+        if p["hasta_oc"]:
+            n_oc, r_oc, a_oc = n_oc + p["n"], r_oc + rojos, a_oc + amar
         t.insert("", "end", tags=("hasta_oc",) if p["hasta_oc"] else (), values=(
-            p["etapa"], p["n"], "-" if p["prom"] is None else f"{p['prom']:.1f}", "-" if p["max"] is None else p["max"],
+            p["etapa"], p["n"], rojos or "", amar or "", "-" if p["prom"] is None else f"{p['prom']:.1f}",
+            "-" if p["max"] is None else p["max"],
             f"{p['montos'].get('PEN', 0):,.2f}" if p["montos"].get("PEN") else "-",
             f"{p['montos'].get('USD', 0):,.2f}" if p["montos"].get("USD") else "-"))
-    t.insert("", "end", tags=("total",), values=("Total pendientes hasta envío de OC", n_oc, "", "", "", ""))
+    t.insert("", "end", tags=("total",), values=("Total pendientes hasta envío de OC", n_oc, r_oc or "", a_oc or "", "", "", "", ""))
     t = app.tree_tiempos
     t.delete(*t.get_children())
     for x in tiempos:
@@ -640,6 +671,9 @@ def importar(app):
 
 
 def exportar(app):
-    salida = rq.exportar_excel(app.con, os.path.join(app_base(app), f"Seguimiento requerimientos {date.today():%d_%m}.xlsx"))
+    u = sem.umbrales(app.cfg)
+    plazos = {f["id"]: sem.texto(sem.nivel_req(f, u)) for f in app.filas_req}
+    salida = rq.exportar_excel(app.con, os.path.join(app_base(app), f"Seguimiento requerimientos {date.today():%d_%m}.xlsx"),
+                               plazos)
     if messagebox.askyesno("Exportar", f"Se generó {os.path.basename(salida)}.\n\n¿Abrirlo en Excel?", parent=app):
         os.startfile(salida)

@@ -22,6 +22,7 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 import procesar_sap as ps
 import seguimiento as sgm
 import requerimientos as rq
+import semaforo as sem
 import app_requerimientos as ui_req
 
 BASE = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
@@ -33,14 +34,15 @@ SITUACIONES = ["Activas", sgm.SIT_SIN_FACT, sgm.SIT_FACTURADA, sgm.SIT_CERRADA_S
                sgm.SIT_FUERA, "Todas"]
 COLS = [("oc", "OC", 85, "e"), ("usuario", "Comprador", 120, "w"), ("proveedor", "Proveedor", 290, "w"),
         ("mon", "Mon", 45, "center"), ("total", "Total sin IGV", 100, "e"), ("fecha_oc", "Fecha OC", 80, "center"),
-        ("dias", "Días", 50, "e"), ("estado_oc", "Estado OC", 80, "w"), ("situacion", "Situación", 110, "w"),
+        ("dias", "Días", 50, "e"), ("plazo", "Plazo", 75, "center"), ("estado_oc", "Estado OC", 80, "w"),
+        ("situacion", "Situación", 110, "w"),
         ("estado_seg", "Seguimiento", 150, "w"), ("responsable", "Responsable", 110, "w"),
         ("compromiso", "Compromiso", 85, "center"), ("ult_com", "Último comentario", 330, "w")]
 COLS_FAC = [("oc", "OC", 85, "e"), ("usuario", "Comprador", 115, "w"), ("proveedor", "Proveedor", 250, "w"),
             ("n_factura", "N° Factura", 110, "w"), ("tipo", "Tipo", 40, "center"), ("estado_factura", "Estado factura", 115, "w"),
             ("mon", "Mon", 45, "center"), ("ft_sin_imp", "FT sin imp.", 95, "e"), ("imp_pendiente", "Imp. pendiente", 100, "e"),
             ("emision", "Emisión", 80, "center"), ("vencimiento", "Vencimiento", 85, "center"),
-            ("dias_venc", "Días p/ vencer", 85, "e"), ("fecha_pago", "Fecha pago", 80, "center"),
+            ("dias_venc", "Días p/ vencer", 85, "e"), ("plazo", "Plazo", 75, "center"), ("fecha_pago", "Fecha pago", 80, "center"),
             ("estado_oc", "Estado OC", 80, "w"), ("ult_com", "Último comentario (OC)", 300, "w")]
 ESTADOS_FACT_FILTRO = ["Pendiente de pago", "Pagado", "Todos", "(sin estado)"]
 MONEDAS = ["Todas", "SOL", "USD", "CAD", "AUD", "GBP", "EUR", "ZAR"]
@@ -194,8 +196,13 @@ class App(tk.Tk):
         self._ui()
         self.bind_all("<F5>", lambda e: self.actualizar_vista())
         self.bind("<Activate>", lambda e: self.after_idle(self._revisar_cambios_externos))
-        self.after(100, self._pedir_autor)
+        self.after(100, self._inicio)
         self.refrescar()
+
+    def _inicio(self):
+        self._pedir_autor()
+        if self.cfg.get("pendientes_al_abrir", True):
+            self.pendientes_de_hoy(auto=True)
 
     def report_callback_exception(self, exc, val, tb):
         """Errores en botones: en el .exe no hay consola, así que se muestran y se guardan en errores.log."""
@@ -225,6 +232,9 @@ class App(tk.Tk):
         ttk.Button(barra, text="🔄  Actualizar Excel con comentarios", command=self.regenerar_excel).pack(side="left", padx=6)
         ttk.Button(barra, text="📊  Abrir último control", command=self.abrir_control).pack(side="left")
         ttk.Button(barra, text="📁  Abrir carpeta", command=lambda: os.startfile(BASE)).pack(side="left", padx=6)
+        ttk.Button(barra, text="🚦  Pendientes de hoy", style="Accent.TButton",
+                   command=self.pendientes_de_hoy).pack(side="left", padx=(12, 0))
+        ttk.Button(barra, text="⚙  Plazos…", command=self.editar_plazos).pack(side="left", padx=6)
         self.lbl_autor = ttk.Label(barra, text="")
         ttk.Button(barra, text="Cambiar", command=lambda: self._pedir_autor(True)).pack(side="right")
         self.lbl_autor.pack(side="right", padx=6)
@@ -259,6 +269,7 @@ class App(tk.Tk):
         self.v_estado_oc = self._combo(filt, "Estado OC:", ["Todos", "En proceso", "Cerrado", "Cancelado"], 13)
         self.v_situacion = self._combo(filt, "Situación:", SITUACIONES, 18)
         self.v_seg = self._combo(filt, "Seguimiento:", ["Todos"] + sgm.ESTADOS_SEG, 22)
+        self.v_semaforo = self._combo(filt, "Plazo:", sem.FILTROS, 18)
 
         filt2 = ttk.Frame(tab_oc, padding=(4, 0, 4, 4))
         filt2.pack(fill="x")
@@ -271,8 +282,10 @@ class App(tk.Tk):
         self.lbl_resumen.pack(side="left")
 
         self.tree = self._tabla(tab_oc, COLS, self.ordenar, ("proveedor", "ult_com"))
-        self.tree.tag_configure("vencido", foreground="#C00000")
-        self.tree.tag_configure("sincom", background="#FFF8DC")
+        for nivel, color in sem.FONDO.items():
+            self.tree.tag_configure(nivel, background=color)
+        self.tree.tag_configure("vencido", foreground="#9C0006")
+        self.tree.tag_configure("sincom", font=("Segoe UI", 9, "bold"))
         self.tree.tag_configure("facturada", background="#E2EFDA")
         self.tree.tag_configure("cerrada", foreground="#808080")
         self.tree.bind("<<TreeviewSelect>>", lambda e: self.seleccionar())
@@ -290,8 +303,7 @@ class App(tk.Tk):
         self.vf_mon = self._combo(ff, "Moneda:", MONEDAS, 6, self.pintar_fac)
         ff2 = ttk.Frame(tab_fac, padding=(4, 0, 4, 4))
         ff2.pack(fill="x")
-        self.vf_vencidas = tk.BooleanVar()
-        ttk.Checkbutton(ff2, text="Solo vencidas sin pagar", variable=self.vf_vencidas, command=self.pintar_fac).pack(side="left")
+        self.vf_semaforo = self._combo(ff2, "Plazo:", sem.FILTROS_FACT, 20, self.pintar_fac)
         self.vf_concom = tk.BooleanVar()
         ttk.Checkbutton(ff2, text="Solo con comentarios", variable=self.vf_concom, command=self.pintar_fac).pack(side="left", padx=10)
         self.vf_fuera = tk.BooleanVar()
@@ -300,7 +312,8 @@ class App(tk.Tk):
         self.lbl_resumen_fac = ttk.Label(ff2, foreground="#404040", justify="left")
         self.lbl_resumen_fac.pack(side="left")
         self.tree_fac = self._tabla(tab_fac, COLS_FAC, self.ordenar_fac, ("proveedor", "ult_com"))
-        self.tree_fac.tag_configure("vencida", foreground="#C00000")
+        for nivel, color in sem.FONDO.items():
+            self.tree_fac.tag_configure(nivel, background=color)
         self.tree_fac.tag_configure("pagada", background="#E2EFDA")
         self.tree_fac.tag_configure("fuera", foreground="#808080")
         self.tree_fac.bind("<<TreeviewSelect>>", lambda e: self.seleccionar_fac())
@@ -427,9 +440,12 @@ class App(tk.Tk):
     def filtradas_fac(self):
         q = self.vf_buscar.get().strip().lower()
         est, comp, eoc, mon = self.vf_estado.get(), self.vf_comprador.get(), self.vf_estado_oc.get(), self.vf_mon.get()
-        hoy = date.today().isoformat()
+        u, plazo = sem.umbrales(self.cfg), self.vf_semaforo.get()
         out = []
         for f in self.facturas:
+            f["nivel"] = sem.nivel_factura(f, u)
+            if not sem.pasa_filtro(f["nivel"], plazo):
+                continue
             if f["situacion"] != sgm.FACT_VIGENTE and not self.vf_fuera.get():
                 continue
             if est == "(sin estado)" and f["estado_factura"]:
@@ -441,8 +457,6 @@ class App(tk.Tk):
             if eoc != "Todos" and f["estado_oc"] != eoc:
                 continue
             if mon != "Todas" and f["mon"] != mon:
-                continue
-            if self.vf_vencidas.get() and not (f["estado_factura"] != "Pagado" and f["vencimiento"] and f["vencimiento"] < hoy):
                 continue
             if self.vf_concom.get() and not f["n_com"]:
                 continue
@@ -460,38 +474,42 @@ class App(tk.Tk):
     def pintar_fac(self):
         filas = self.filtradas_fac()
         clave, desc = self.orden_fac
+        orden_nivel = {sem.ROJO: 0, sem.AMARILLO: 1, sem.VERDE: 2}
         num = {"oc": lambda f: f["numero_oc"], "ft_sin_imp": lambda f: f["ft_sin_imp"] or 0,
                "imp_pendiente": lambda f: f["imp_pendiente"] or 0,
-               "dias_venc": lambda f: self._dias_venc(f) if self._dias_venc(f) is not None else 99999}
+               "dias_venc": lambda f: self._dias_venc(f) if self._dias_venc(f) is not None else 99999,
+               "plazo": lambda f: (orden_nivel.get(f["nivel"], 3), self._dias_venc(f) or 0)}
         keyf = num.get(clave, lambda f: str(f.get(clave) or "").lower())
         filas.sort(key=keyf, reverse=desc)
         t = self.tree_fac
         t.delete(*t.get_children())
-        hoy = date.today().isoformat()
         for f in filas:
             tags = []
             if f["situacion"] != sgm.FACT_VIGENTE:
                 tags.append("fuera")
             elif f["estado_factura"] == "Pagado":
                 tags.append("pagada")
-            elif f["vencimiento"] and f["vencimiento"] < hoy:
-                tags.append("vencida")
+            elif f["nivel"] in sem.FONDO:
+                tags.append(f["nivel"])
             dv = self._dias_venc(f)
             t.insert("", "end", iid=f"{f['ruc']}|{f['n_factura']}", tags=tags, values=(
                 f["numero_oc"], f["usuario"], f["proveedor"], f["n_factura"], f["tipo"], f["estado_factura"], f["mon"],
                 f"{f['ft_sin_imp'] or 0:,.2f}", f"{f['imp_pendiente'] or 0:,.2f}", fmt_fecha(f["emision"]),
-                fmt_fecha(f["vencimiento"]), "" if dv is None else dv, fmt_fecha(f["fecha_pago"]), f["estado_oc"],
-                (f["ult_com"] or "").replace("\n", " ")))
+                fmt_fecha(f["vencimiento"]), "" if dv is None else dv, sem.TEXTO_FACT.get(f["nivel"], ""),
+                fmt_fecha(f["fecha_pago"]), f["estado_oc"], (f["ult_com"] or "").replace("\n", " ")))
+        u = sem.umbrales(self.cfg)
         vig = [f for f in self.facturas if f["situacion"] == sgm.FACT_VIGENTE]
         pend = [f for f in vig if f["estado_factura"] == "Pendiente de pago"]
-        venc = sum(1 for f in pend if f["vencimiento"] and f["vencimiento"] < hoy)
+        venc = sum(1 for f in pend if sem.nivel_factura(f, u) == sem.ROJO)
+        por_vencer = sum(1 for f in pend if sem.nivel_factura(f, u) == sem.AMARILLO)
         tot = {}
         for f in filas:
             if f["estado_factura"] != "Pagado":
                 tot[f["mon"]] = tot.get(f["mon"], 0) + (f["imp_pendiente"] or 0)
         txt_tot = " · ".join(f"{m} {v:,.2f}" for m, v in sorted(tot.items()) if v)
         self.lbl_resumen_fac.config(
-            text=f"Mostrando {len(filas)}   |   Pendientes de pago: {len(pend)} (vencidas {venc}) · "
+            text=f"Mostrando {len(filas)}   |   Pendientes de pago: {len(pend)} (vencidas {venc}, vencen en "
+                 f"{u['fact']} días o menos {por_vencer}) · "
                  f"Pagadas: {sum(1 for f in vig if f['estado_factura'] == 'Pagado')}"
                  + (f"\nImporte pendiente de lo mostrado: {txt_tot}" if txt_tot else ""))
         if self.modo == "fac" and self.oc_sel:
@@ -512,7 +530,8 @@ class App(tk.Tk):
         for v in (self.vf_comprador, self.vf_estado_oc):
             v.set("Todos")
         self.vf_mon.set("Todas")
-        for v in (self.vf_vencidas, self.vf_concom, self.vf_fuera):
+        self.vf_semaforo.set("Todas")
+        for v in (self.vf_concom, self.vf_fuera):
             v.set(False)
         self.pintar_fac()
 
@@ -549,8 +568,12 @@ class App(tk.Tk):
         q = self.v_buscar.get().strip().lower()
         comp, eoc, sit, seg = self.v_comprador.get(), self.v_estado_oc.get(), self.v_situacion.get(), self.v_seg.get()
         hoy = date.today().isoformat()
+        u, plazo = sem.umbrales(self.cfg), self.v_semaforo.get()
         out = []
         for f in self.filas:
+            f["nivel"] = sem.nivel_oc(f, u)
+            if not sem.pasa_filtro(f["nivel"], plazo):
+                continue
             if sit == "Activas" and f["situacion"] != sgm.SIT_ACTIVA:
                 continue
             if sit not in ("Activas", "Todas") and f["situacion"] != sit:
@@ -573,9 +596,12 @@ class App(tk.Tk):
     def pintar(self):
         filas = self.filtradas()
         clave, desc = self.orden
+        orden_nivel = {sem.ROJO: 0, sem.AMARILLO: 1, sem.VERDE: 2}
         keyf = {"oc": lambda f: f["numero_oc"], "dias": lambda f: sgm.dias_desde(f["fecha_oc"]) or 0,
                 "total": lambda f: f["total"] or 0, "fecha_oc": lambda f: f["fecha_oc"] or "",
-                "compromiso": lambda f: f["fecha_compromiso"] or "9999"}.get(clave, lambda f: str(f.get(clave) or "").lower())
+                "compromiso": lambda f: f["fecha_compromiso"] or "9999",
+                "plazo": lambda f: (orden_nivel.get(f["nivel"], 3), -(sgm.dias_desde(f["fecha_oc"]) or 0))
+                }.get(clave, lambda f: str(f.get(clave) or "").lower())
         filas.sort(key=keyf, reverse=desc)
         self.tree.delete(*self.tree.get_children())
         hoy = date.today().isoformat()
@@ -586,21 +612,26 @@ class App(tk.Tk):
             elif f["situacion"] != sgm.SIT_ACTIVA:
                 tags.append("cerrada")
             else:
+                if f["nivel"] in sem.FONDO:
+                    tags.append(f["nivel"])
                 if not f["n_com"]:
                     tags.append("sincom")
                 if f["fecha_compromiso"] and f["fecha_compromiso"] < hoy:
                     tags.append("vencido")
             self.tree.insert("", "end", iid=str(f["numero_oc"]), tags=tags, values=(
                 f["numero_oc"], f["usuario"], f["proveedor"], f["mon"], f"{f['total'] or 0:,.2f}", fmt_fecha(f["fecha_oc"]),
-                sgm.dias_desde(f["fecha_oc"]) or "", f["estado_oc"], f["situacion"], f["estado_seg"], f["responsable"] or "",
-                fmt_fecha(f["fecha_compromiso"]), (f["ult_com"] or "").replace("\n", " ")))
+                sgm.dias_desde(f["fecha_oc"]) or "", sem.texto(f["nivel"]), f["estado_oc"], f["situacion"], f["estado_seg"],
+                f["responsable"] or "", fmt_fecha(f["fecha_compromiso"]), (f["ult_com"] or "").replace("\n", " ")))
         activas = [f for f in self.filas if f["situacion"] == sgm.SIT_ACTIVA]
         sin_c = sum(1 for f in activas if not f["n_com"])
         venc = sum(1 for f in activas if f["fecha_compromiso"] and f["fecha_compromiso"] < hoy)
         por_sit = {s: sum(1 for f in self.filas if f["situacion"] == s) for s in SITUACIONES[1:-1]}
         cerradas = " · ".join(f"{s}: {n}" for s, n in por_sit.items())
-        texto = (f"Mostrando {len(filas)}   |   Activas: {len(activas)} (sin comentarios {sin_c}, vencidos {venc})"
-                 f"   |   {cerradas}")
+        u = sem.umbrales(self.cfg)
+        rojas = sum(1 for f in activas if sem.nivel_oc(f, u) == sem.ROJO)
+        amar = sum(1 for f in activas if sem.nivel_oc(f, u) == sem.AMARILLO)
+        texto = (f"Mostrando {len(filas)}   |   Activas: {len(activas)} (atrasadas {rojas}, en atención {amar}, "
+                 f"sin comentarios {sin_c} en negrita, compromisos vencidos {venc})   |   {cerradas}")
         sit = self.v_situacion.get()
         if not filas and sit in por_sit and por_sit[sit] == 0:
             texto += (f"\nAún no hay OCs en «{sit}»: una OC pasa a esa situación cuando un reporte posterior "
@@ -622,7 +653,7 @@ class App(tk.Tk):
 
     def limpiar_filtros(self):
         self.v_buscar.set("")
-        for v in (self.v_comprador, self.v_seg):
+        for v in (self.v_comprador, self.v_seg, self.v_semaforo):
             v.set("Todos")
         self.v_estado_oc.set("Todos")
         self.v_situacion.set("Activas")
@@ -780,6 +811,180 @@ class App(tk.Tk):
         self.txt_com.delete("1.0", "end")
         self.borradores.pop(self.oc_sel, None)
         self.refrescar()
+
+    # ------------------------------------------------- semáforo de plazos
+    def pendientes_de_hoy(self, auto=False):
+        """Resumen de lo atrasado y lo que requiere atención, con acceso directo a cada lista."""
+        u = sem.umbrales(self.cfg)
+        hoy = date.today()
+
+        def cuenta(filas, fn):
+            niveles = [fn(f) for f in filas]
+            return niveles.count(sem.ROJO), niveles.count(sem.AMARILLO)
+
+        abiertos = [f for f in self.filas_req if f["etapa"] not in rq.CERRADAS]
+        hasta = [f for f in abiertos if f["etapa"] in rq.ETAPAS_HASTA_OC]
+        despues = [f for f in abiertos if f["etapa"] not in rq.ETAPAS_HASTA_OC]
+        activas = [f for f in self.filas if f["situacion"] == sgm.SIT_ACTIVA]
+        r1, a1 = cuenta(hasta, lambda f: sem.nivel_req(f, u))
+        r2, a2 = cuenta(despues, lambda f: sem.nivel_req(f, u))
+        r3, a3 = cuenta(activas, lambda f: sem.nivel_oc(f, u))
+        r4, a4 = cuenta(self.facturas, lambda f: sem.nivel_factura(f, u))
+        comp_venc = sum(1 for f in activas if f["fecha_compromiso"] and f["fecha_compromiso"] < hoy.isoformat())
+        comp_hoy = sum(1 for f in activas if f["fecha_compromiso"] == hoy.isoformat())
+        if auto and not any((r1, a1, r2, a2, r3, a3, r4, a4, comp_hoy)):
+            return
+
+        win = tk.Toplevel(self)
+        win.title("Pendientes de hoy")
+        win.transient(self)
+        win.resizable(False, False)
+        cuerpo = ttk.Frame(win, padding=16)
+        cuerpo.pack(fill="both", expand=True)
+        ttk.Label(cuerpo, text=f"🚦 Pendientes de hoy · {hoy:%d/%m/%Y}", style="Titulo.TLabel").grid(
+            row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
+
+        def chip(parent, texto_chip, nivel, fila, col):
+            tk.Label(parent, text=texto_chip, bg=sem.FONDO[nivel] if texto_chip[0] != "0" else "#F2F2F2",
+                     font=("Segoe UI", 9, "bold"), padx=8, pady=2).grid(row=fila, column=col, sticky="w", padx=4)
+
+        lineas = [
+            ("Requerimientos hasta el envío de la OC", f"{r1} atrasados", f"{a1} en atención", "req_hasta"),
+            ("Requerimientos después de la OC (factura y pago)", f"{r2} atrasados", f"{a2} en atención", "req_abiertos"),
+            ("OC sin factura (en proceso)", f"{r3} atrasadas", f"{a3} en atención", "oc"),
+            ("Facturas pendientes de pago", f"{r4} vencidas", f"{a4} vencen en {u['fact']} días o menos", "fac"),
+        ]
+        for i, (titulo, roja, amarilla, destino) in enumerate(lineas, start=1):
+            ttk.Label(cuerpo, text=titulo, font=("Segoe UI", 10)).grid(row=i, column=0, sticky="w", pady=3)
+            chip(cuerpo, roja, sem.ROJO, i, 1)
+            chip(cuerpo, amarilla, sem.AMARILLO, i, 2)
+            ttk.Button(cuerpo, text="Ver →", command=lambda d=destino: (self._ir(d), win.destroy())).grid(
+                row=i, column=3, sticky="e", padx=(8, 0))
+        ttk.Label(cuerpo, text=f"Compromisos de OC vencidos: {comp_venc} · vencen hoy: {comp_hoy}",
+                  foreground="#9C0006" if comp_venc else "#404040").grid(row=5, column=0, columnspan=4, sticky="w", pady=(6, 0))
+
+        # Lo más atrasado hasta el envío de la OC
+        top = sorted((f for f in hasta if sem.nivel_req(f, u) == sem.ROJO), key=lambda f: -(f["dias_etapa"] or 0))[:5]
+        if top:
+            ttk.Label(cuerpo, text="Lo más atrasado hasta el envío de la OC:", font=("Segoe UI", 9, "bold")).grid(
+                row=6, column=0, columnspan=4, sticky="w", pady=(12, 2))
+            for j, f in enumerate(top, start=7):
+                desc = f["proveedor"] or f["proyecto_nombre"] or f["proyecto"]
+                ttk.Label(cuerpo, text=f"  • COD {f['id']:03d} · {f['etapa']} · {f['dias_etapa']} días · {desc[:55]}").grid(
+                    row=j, column=0, columnspan=4, sticky="w")
+
+        pie = ttk.Frame(win, padding=(16, 0, 16, 12))
+        pie.pack(fill="x")
+        v_abrir = tk.BooleanVar(value=self.cfg.get("pendientes_al_abrir", True))
+
+        def cambiar_abrir():
+            self.cfg["pendientes_al_abrir"] = v_abrir.get()
+            guardar_cfg(self.cfg)
+        ttk.Checkbutton(pie, text="Mostrar al abrir la aplicación", variable=v_abrir, command=cambiar_abrir).pack(side="left")
+        ttk.Button(pie, text="Cerrar", command=win.destroy).pack(side="right")
+        ttk.Button(pie, text="⚙  Plazos…", command=lambda: (win.destroy(), self.editar_plazos())).pack(side="right", padx=6)
+        win.bind("<Escape>", lambda e: win.destroy())
+        win.update_idletasks()
+        win.geometry(f"+{self.winfo_rootx() + max(0, (self.winfo_width() - win.winfo_width()) // 2)}+{self.winfo_rooty() + 120}")
+        win.focus_set()
+        return win
+
+    def _ir(self, destino):
+        """Abre la pestaña y deja aplicados los filtros de «solo lo atrasado y en atención»."""
+        if destino in ("req_hasta", "req_abiertos"):
+            self.nb.select(0)
+            for v in (self.vr_tipo, self.vr_controller, self.vr_mes):
+                v.set("Todos")
+            self.vr_buscar.set("")
+            self.vr_etapa.set("Pendientes hasta envío de OC" if destino == "req_hasta" else "Abiertos (todos)")
+            self.vr_semaforo.set("Atrasado + Atención")
+            self.orden_req = ("plazo", False)
+            ui_req.pintar_req(self)
+        elif destino == "oc":
+            self.nb.select(1)
+            self.limpiar_filtros()
+            self.v_semaforo.set("Atrasado + Atención")
+            self.orden = ("plazo", False)
+            self.pintar()
+        else:
+            self.nb.select(2)
+            self.limpiar_filtros_fac()
+            self.vf_semaforo.set("Vencidas + por vencer")
+            self.orden_fac = ("dias_venc", False)
+            self.pintar_fac()
+
+    def editar_plazos(self):
+        """Umbrales del semáforo: desde cuántos días un pendiente pasa a «Atención» y a «Atrasado»."""
+        u = sem.umbrales(self.cfg)
+        win = tk.Toplevel(self)
+        win.title("Plazos del semáforo")
+        win.transient(self)
+        win.resizable(False, False)
+        cuerpo = ttk.Frame(win, padding=16)
+        cuerpo.pack(fill="both", expand=True)
+        ttk.Label(cuerpo, text="Días a partir de los cuales un pendiente pasa a «Atención» (amarillo) y a «Atrasado» (rojo).",
+                  wraplength=560).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 8))
+        for c, t in enumerate(["Requerimientos: días en la etapa", "Atención desde", "Atrasado desde"]):
+            ttk.Label(cuerpo, text=t, font=("Segoe UI", 9, "bold")).grid(row=1, column=c, sticky="w", padx=4)
+        vars_req = {}
+        fila = 2
+        for etapa in rq.NOMBRES_ETAPA[:-1]:
+            a, r = u["req"][etapa]
+            va, vr = tk.StringVar(value=str(a)), tk.StringVar(value=str(r))
+            vars_req[etapa] = (va, vr)
+            ttk.Label(cuerpo, text=etapa + ("  (hasta la OC)" if etapa in rq.ETAPAS_HASTA_OC else "")).grid(
+                row=fila, column=0, sticky="w", padx=4)
+            ttk.Spinbox(cuerpo, from_=0, to=365, width=6, textvariable=va).grid(row=fila, column=1, sticky="w", padx=4, pady=1)
+            ttk.Spinbox(cuerpo, from_=0, to=365, width=6, textvariable=vr).grid(row=fila, column=2, sticky="w", padx=4, pady=1)
+            fila += 1
+        ttk.Separator(cuerpo).grid(row=fila, column=0, columnspan=3, sticky="ew", pady=8)
+        fila += 1
+        oa, orr = tk.StringVar(value=str(u["oc"][0])), tk.StringVar(value=str(u["oc"][1]))
+        ttk.Label(cuerpo, text="OC sin factura: días desde la fecha de la OC").grid(row=fila, column=0, sticky="w", padx=4)
+        ttk.Spinbox(cuerpo, from_=0, to=999, width=6, textvariable=oa).grid(row=fila, column=1, sticky="w", padx=4)
+        ttk.Spinbox(cuerpo, from_=0, to=999, width=6, textvariable=orr).grid(row=fila, column=2, sticky="w", padx=4)
+        fila += 1
+        ttk.Label(cuerpo, text="(una OC con el compromiso vencido siempre queda «Atrasada»)", foreground="#808080").grid(
+            row=fila, column=0, columnspan=3, sticky="w", padx=4)
+        fila += 1
+        fv = tk.StringVar(value=str(u["fact"]))
+        ttk.Label(cuerpo, text="Facturas: «Por vencer» cuando faltan (días)").grid(row=fila, column=0, sticky="w", padx=4, pady=(6, 0))
+        ttk.Spinbox(cuerpo, from_=0, to=90, width=6, textvariable=fv).grid(row=fila, column=1, sticky="w", padx=4, pady=(6, 0))
+        ttk.Label(cuerpo, text="(vencida = «Vencida»)", foreground="#808080").grid(row=fila, column=2, sticky="w", padx=4, pady=(6, 0))
+
+        def restaurar():
+            for etapa, (va, vr) in vars_req.items():
+                va.set(str(sem.PLAZOS_REQ[etapa][0]))
+                vr.set(str(sem.PLAZOS_REQ[etapa][1]))
+            oa.set(str(sem.PLAZO_OC[0]))
+            orr.set(str(sem.PLAZO_OC[1]))
+            fv.set(str(sem.AVISO_FACTURA))
+
+        def guardar():
+            try:
+                nuevo = {"req": {e: (int(va.get()), int(vr.get())) for e, (va, vr) in vars_req.items()},
+                         "oc": (int(oa.get()), int(orr.get())), "fact": int(fv.get())}
+            except ValueError:
+                messagebox.showwarning("Plazos", "Escribe los días como números enteros.", parent=win)
+                return
+            malos = [e for e, (a, r) in list(nuevo["req"].items()) + [("OC sin factura", nuevo["oc"])] if a > r]
+            if malos:
+                messagebox.showwarning("Plazos", "«Atención desde» no puede ser mayor que «Atrasado desde» en:\n• "
+                                       + "\n• ".join(malos), parent=win)
+                return
+            sem.guardar_umbrales(self.cfg, nuevo)
+            guardar_cfg(self.cfg)
+            win.destroy()
+            self.refrescar()
+
+        pie = ttk.Frame(win, padding=(16, 0, 16, 12))
+        pie.pack(fill="x")
+        ttk.Button(pie, text="Restaurar valores iniciales", command=restaurar).pack(side="left")
+        ttk.Button(pie, text="Cancelar", command=win.destroy).pack(side="right")
+        ttk.Button(pie, text="💾  Guardar", style="Accent.TButton", command=guardar).pack(side="right", padx=6)
+        win.bind("<Escape>", lambda e: win.destroy())
+        win.grab_set()
+        return win
 
     # ------------------------------------------------- carga / Excel
     def _en_segundo_plano(self, titulo, fn, al_terminar):

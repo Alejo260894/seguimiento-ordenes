@@ -556,9 +556,10 @@ def indicadores(filas):
 # ---------------------------------------------------------------------------
 # Exportación a Excel
 # ---------------------------------------------------------------------------
-def exportar_excel(con, salida):
+def exportar_excel(con, salida, plazos=None):
     """Genera el Excel de seguimiento. Si `salida` está abierto en Excel, guarda una copia con la hora.
-    Devuelve la ruta realmente escrita."""
+    `plazos`: {id: 'Atrasado' | 'Atención' | 'En plazo'} del semáforo (columna PLAZO). Devuelve la ruta escrita."""
+    plazos = plazos or {}
     import xlsxwriter
     filas = listar(con)
     destino, salida = salida, os.path.join(os.path.dirname(salida), f"~tmp_req_{os.getpid()}.xlsx")
@@ -574,7 +575,7 @@ def exportar_excel(con, salida):
 
     # --- CONTROL (mismas columnas que el Excel original + etapa y tiempos)
     ws = wb.add_worksheet("CONTROL")
-    extra = ["CONTROLLER", "CONTROLLER2", "JEFE DE PROYECTO", "ETAPA", "DÍAS EN ETAPA", "ESTADO OC SAP",
+    extra = ["CONTROLLER", "CONTROLLER2", "JEFE DE PROYECTO", "ETAPA", "DÍAS EN ETAPA", "PLAZO", "ESTADO OC SAP",
              "ÚLTIMO COMENTARIO OC", "DATOS DESDE SAP", "NOTAS"]
     tramos = [t[0] for t in TRAMOS]
     enc = [h for _, h, _ in CAMPOS] + extra + [f"DÍAS: {t}" for t in tramos]
@@ -591,7 +592,8 @@ def exportar_excel(con, salida):
         for campo, _, tipo in CAMPOS:
             v = f[campo]
             fila.append(datetime.strptime(v, "%Y-%m-%d") if tipo == "fecha" and v else (v if v not in ("", None) else None))
-        fila += [f["controller"], f["controller2"], f["jefe"], f["etapa"], f["dias_etapa"], f["sap_estado"] or None,
+        fila += [f["controller"], f["controller2"], f["jefe"], f["etapa"], f["dias_etapa"], plazos.get(f["id"]) or None,
+                 f["sap_estado"] or None,
                  f["com_oc"] or None, ", ".join(ETIQUETAS[c] for c in f["desde_sap"]), f["notas"] or None]
         fila += [None] * len(tramos)
         datos.append(fila)
@@ -633,20 +635,28 @@ def exportar_excel(con, salida):
     pe.write("A1", "Pendientes por etapa", titulo)
     pe.write("A2", "Fórmulas sobre la tabla CONTROL (columna ETAPA y DÍAS EN ETAPA). Las primeras 6 etapas son el "
                    "seguimiento hasta el envío de la orden.", sub)
-    pe.write_row(3, 0, ["Etapa", "N°", "Días promedio en la etapa", "Máx. días", "Monto PEN", "Monto USD"], hdr)
+    pe.write_row(3, 0, ["Etapa", "N°", "Atrasados", "En atención", "Días promedio en la etapa", "Máx. días",
+                        "Monto PEN", "Monto USD"], hdr)
+    rojo = F(num_format='0;-0;"-"', bg_color="#F8CBAD")
+    amarillo = F(num_format='0;-0;"-"', bg_color="#FFE699")
     for i, nombre in enumerate(NOMBRES_ETAPA[:-1]):
         r = 4 + i
         pe.write(r, 0, nombre, F(bold=nombre in ETAPAS_HASTA_OC))
         pe.write_formula(r, 1, f'=COUNTIFS(Tabla1[ETAPA],$A{r + 1})')
-        pe.write_formula(r, 2, f'=IFERROR(AVERAGEIFS(Tabla1[DÍAS EN ETAPA],Tabla1[ETAPA],$A{r + 1}),"-")', F(num_format="0.0"))
-        pe.write_formula(r, 3, f'=IF(B{r + 1}=0,"-",_xlfn.MAXIFS(Tabla1[DÍAS EN ETAPA],Tabla1[ETAPA],$A{r + 1}))')
-        pe.write_formula(r, 4, f'=SUMIFS(Tabla1[MONTO],Tabla1[ETAPA],$A{r + 1},Tabla1[MONEDA],"PEN")', F(num_format='#,##0.00;-#,##0.00;"-"'))
-        pe.write_formula(r, 5, f'=SUMIFS(Tabla1[MONTO],Tabla1[ETAPA],$A{r + 1},Tabla1[MONEDA],"USD")', F(num_format='#,##0.00;-#,##0.00;"-"'))
+        pe.write_formula(r, 2, f'=COUNTIFS(Tabla1[ETAPA],$A{r + 1},Tabla1[PLAZO],"Atrasado")', rojo)
+        pe.write_formula(r, 3, f'=COUNTIFS(Tabla1[ETAPA],$A{r + 1},Tabla1[PLAZO],"Atención")', amarillo)
+        pe.write_formula(r, 4, f'=IFERROR(AVERAGEIFS(Tabla1[DÍAS EN ETAPA],Tabla1[ETAPA],$A{r + 1}),"-")', F(num_format="0.0"))
+        pe.write_formula(r, 5, f'=IF(B{r + 1}=0,"-",_xlfn.MAXIFS(Tabla1[DÍAS EN ETAPA],Tabla1[ETAPA],$A{r + 1}))')
+        pe.write_formula(r, 6, f'=SUMIFS(Tabla1[MONTO],Tabla1[ETAPA],$A{r + 1},Tabla1[MONEDA],"PEN")', F(num_format='#,##0.00;-#,##0.00;"-"'))
+        pe.write_formula(r, 7, f'=SUMIFS(Tabla1[MONTO],Tabla1[ETAPA],$A{r + 1},Tabla1[MONEDA],"USD")', F(num_format='#,##0.00;-#,##0.00;"-"'))
     fin = 4 + len(NOMBRES_ETAPA) - 1
-    pe.write(fin, 0, "Total pendientes hasta envío de OC", F(bold=True, bg_color="#F2F2F2"))
-    pe.write_formula(fin, 1, f"=SUM(B5:B{4 + len(ETAPAS_HASTA_OC)})", F(bold=True, bg_color="#F2F2F2"))
+    total = F(bold=True, bg_color="#F2F2F2")
+    pe.write(fin, 0, "Total pendientes hasta envío de OC", total)
+    for c, col in enumerate("BCD", start=1):
+        pe.write_formula(fin, c, f"=SUM({col}5:{col}{4 + len(ETAPAS_HASTA_OC)})", total)
+    pe.write(fin + 2, 0, "Plazo: «Atrasado» y «Atención» según los umbrales del semáforo de la aplicación (⚙ Plazos…).", sub)
     pe.set_column("A:A", 34)
-    pe.set_column("B:F", 16)
+    pe.set_column("B:H", 15)
 
     # --- TIEMPOS
     ti = wb.add_worksheet("TIEMPOS")
