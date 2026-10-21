@@ -9,10 +9,11 @@ Seguimiento de requerimientos (solicitudes del Accede / correo) desde la solicit
 - Etapa: se calcula según las fechas registradas (ver ETAPAS).
 """
 import json
+import numbers
 import os
 import shutil
 import tempfile
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 
 import pandas as pd
 
@@ -111,31 +112,57 @@ CREATE TABLE IF NOT EXISTS sap_fact (
     numero_oc INTEGER, n_factura TEXT, estado TEXT, contab TEXT, emision TEXT, fecha_pago TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_sap_fact ON sap_fact(numero_oc);
+CREATE TABLE IF NOT EXISTS req_config (clave TEXT PRIMARY KEY, valor TEXT);
 """
+
+
+def _agregar_columna(con, tabla, columna, tipo):
+    if columna not in {r[1] for r in con.execute(f"PRAGMA table_info({tabla})")}:
+        con.execute(f"ALTER TABLE {tabla} ADD COLUMN {columna} {tipo}")
 
 
 def preparar(con):
     con.executescript(SCHEMA)
+    _agregar_columna(con, "sap_fact", "monto", "REAL")               # FT Sin Imp. de cada factura
+    _agregar_columna(con, "req", "manual", "TEXT DEFAULT '[]'")      # campos que el usuario vació a propósito
     con.commit()
+
+
+def config(con, clave, valor=None):
+    """Lee (valor=None) o guarda un valor de configuración interna."""
+    if valor is None:
+        r = con.execute("SELECT valor FROM req_config WHERE clave=?", (clave,)).fetchone()
+        return r[0] if r else None
+    con.execute("INSERT OR REPLACE INTO req_config VALUES (?,?)", (clave, str(valor)))
 
 
 def _ahora():
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+FORMATOS_FECHA = ("%Y-%m-%d", "%d/%m/%Y", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M:%S", "%d/%m/%y", "%d-%m-%Y", "%d.%m.%Y")
+
+
 def _iso(v):
-    """Fecha (datetime/Timestamp/str) -> 'YYYY-MM-DD' o ''."""
+    """Fecha (datetime/Timestamp/texto/número de serie de Excel) -> 'YYYY-MM-DD' o '' si no es una fecha."""
     if v is None or (not isinstance(v, str) and pd.isna(v)):
         return ""
     if isinstance(v, str):
         v = v.strip()
-        for fmt in ("%Y-%m-%d", "%d/%m/%Y", "%Y-%m-%d %H:%M:%S"):
+        for f in FORMATOS_FECHA:
             try:
-                return datetime.strptime(v, fmt).strftime("%Y-%m-%d")
+                return datetime.strptime(v, f).strftime("%Y-%m-%d")
             except ValueError:
                 pass
         return ""
-    return v.strftime("%Y-%m-%d")
+    if isinstance(v, numbers.Number) and not isinstance(v, bool):
+        return (datetime(1899, 12, 30) + timedelta(days=int(v))).strftime("%Y-%m-%d") if 20000 < v < 80000 else ""
+    return v.strftime("%Y-%m-%d") if hasattr(v, "strftime") else ""
+
+
+def _norm(v):
+    """Valor vacío ('' o None) -> None, para comparar sin confundir 0 con vacío."""
+    return None if v is None or v == "" else v
 
 
 def _txt(v):
@@ -193,8 +220,6 @@ def actualizar_catalogos(con, ruta_excel, sap_df=None):
             filas.append((cod, _txt(r[col("NOMBRE")]), _txt(r[col("NOMBRE CORTO")]), _txt(r[col("ESTADO")]),
                           _txt(r[col("CLIENTE")]), _txt(r[col("RESPONSABLE")]), _txt(r[col("CONTROL PLANNER 1")]),
                           _txt(r[col("CONTROL PLANNER 2")])))
-    con.execute("DELETE FROM cat_proyectos")
-    con.executemany("INSERT OR REPLACE INTO cat_proyectos VALUES (?,?,?,?,?,?,?,?)", filas)
     prov = {}
     for _, r in pv.iterrows():
         n = _txt(r.get("RazonSocial"))
@@ -207,14 +232,17 @@ def actualizar_catalogos(con, ruta_excel, sap_df=None):
         for n, ruc in con.execute("SELECT DISTINCT proveedor, ruc FROM sap_oc"):
             if n:
                 prov.setdefault(n.upper(), (n, ruc, "SAP"))
-    con.execute("DELETE FROM cat_proveedores")
-    con.executemany("INSERT OR REPLACE INTO cat_proveedores VALUES (?,?,?)", list(prov.values()))
-    con.commit()
+    with con:      # todo o nada: si algo falla, los catálogos anteriores quedan intactos
+        con.execute("DELETE FROM cat_proyectos")
+        con.executemany("INSERT OR REPLACE INTO cat_proyectos VALUES (?,?,?,?,?,?,?,?)", filas)
+        con.execute("DELETE FROM cat_proveedores")
+        con.executemany("INSERT OR REPLACE INTO cat_proveedores VALUES (?,?,?)", list(prov.values()))
     return len(filas), len(prov)
 
 
 def importar_control(con, ruta_excel, autor="Importación"):
-    """Importa la tabla CONTROL del Excel. Solo agrega los COD que no existan en la base."""
+    """Importa la tabla CONTROL del Excel. Solo agrega los COD que no existan en la base.
+    Devuelve (nuevos, avisos). Todo o nada: si algo falla no queda nada a medias."""
     tmp = _copia_lectura(ruta_excel)
     try:
         c = pd.read_excel(tmp, sheet_name="CONTROL", header=1, dtype=object)
@@ -222,25 +250,32 @@ def importar_control(con, ruta_excel, autor="Importación"):
         os.remove(tmp)
     c.columns = [_txt(x) for x in c.columns]
     existentes = {r[0] for r in con.execute("SELECT id FROM req")}
-    nuevos = 0
-    for _, r in c.iterrows():
-        cod = _int(r.get("COD"))
-        if cod is None or cod in existentes or not any(_txt(r.get(h)) for _, h, _ in CAMPOS[1:]):
-            continue
-        valores = {}
-        for campo, enc, tipo in CAMPOS:
-            v = r.get(enc)
-            valores[campo] = (_iso(v) if tipo == "fecha" else _num(v) if tipo == "num"
-                              else _int(v) if tipo == "int" else _txt(v))
-        valores["id"] = cod
-        valores["estatus"] = valores["estatus"].upper()
-        cols = list(valores) + ["creado", "modificado"]
-        con.execute(f"INSERT INTO req({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
-                    [valores[k] for k in valores] + [_ahora(), _ahora()])
-        evento(con, cod, "Importado desde el Excel de seguimiento.", autor, "sistema")
-        nuevos += 1
-    con.commit()
-    return nuevos
+    nuevos, avisos, max_cod = 0, [], 0
+    with con:
+        for _, r in c.iterrows():
+            cod = _int(r.get("COD"))
+            if cod is None:
+                continue
+            max_cod = max(max_cod, cod)      # incluye las filas ya numeradas pero vacías
+            if cod in existentes or not any(_txt(r.get(h)) for _, h, _ in CAMPOS[1:]):
+                continue
+            valores = {}
+            for campo, enc, tipo in CAMPOS:
+                v = r.get(enc)
+                valores[campo] = (_iso(v) if tipo == "fecha" else _num(v) if tipo == "num"
+                                  else _int(v) if tipo == "int" else _txt(v))
+                if tipo == "fecha" and not valores[campo] and _txt(v):
+                    avisos.append(f"COD {cod:03d}: «{enc}» = {_txt(v)!r} no es una fecha válida (quedó vacía)")
+            valores["id"] = cod
+            valores["estatus"] = valores["estatus"].upper()
+            cols = list(valores) + ["creado", "modificado"]
+            con.execute(f"INSERT INTO req({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                        [valores[k] for k in valores] + [_ahora(), _ahora()])
+            evento(con, cod, "Importado desde el Excel de seguimiento.", autor, "sistema")
+            existentes.add(cod)
+            nuevos += 1
+        config(con, "max_cod_excel", max(max_cod, int(config(con, "max_cod_excel") or 0)))
+    return nuevos, avisos
 
 
 # ---------------------------------------------------------------------------
@@ -255,9 +290,10 @@ def guardar_snapshot_sap(con, df):
          MON_SAP.get(r["Mon"], r["Mon"]), _num(r["Total Sin IGV"]), r["Estado"]) for _, r in cab.iterrows()])
     con.execute("DELETE FROM sap_fact")
     fx = df[df["N° Factura"] != ""]
-    con.executemany("INSERT INTO sap_fact VALUES (?,?,?,?,?,?)", [
+    con.executemany("INSERT INTO sap_fact(numero_oc, n_factura, estado, contab, emision, fecha_pago, monto) "
+                    "VALUES (?,?,?,?,?,?,?)", [
         (int(r["Numero OC"]), r["N° Factura"], r["Estado Factura"], _iso(r["Contab. FT"]), _iso(r["Emisión FT"]),
-         _iso(r["Fecha Pago"])) for _, r in fx.iterrows()])
+         _iso(r["Fecha Pago"]), _num(r["FT Sin Imp."])) for _, r in fx.iterrows()])
     con.commit()
 
 
@@ -269,64 +305,94 @@ def datos_sap(con, orden):
     if oc is None:
         return None
     fac = [dict(r) for r in con.execute("SELECT * FROM sap_fact WHERE numero_oc=? ORDER BY contab", (int(orden),))]
-    pagadas = [f for f in fac if f["estado"] == "Pagado" and f["fecha_pago"]]
     d = {"emision_oc": oc["fecha"], "aprob_oc": oc["aprobacion"], "proveedor": oc["proveedor"],
-         "monto": oc["total"], "moneda": oc["mon"], "estado_oc": oc["estado"], "facturas": fac}
+         "monto": oc["total"], "moneda": oc["mon"], "estado_oc": oc["estado"], "facturas": fac, "sin_pago": ""}
     if fac:
         d["num_factura"] = ", ".join(f["n_factura"] for f in fac)
-        d["recepcion_fact"] = min(f["contab"] for f in fac if f["contab"]) if any(f["contab"] for f in fac) else ""
-        # Fecha de pago: solo cuando TODAS las facturas de la OC están pagadas
-        if len(pagadas) == len(fac):
+        contab = [f["contab"] for f in fac if f["contab"]]
+        if contab:
+            d["recepcion_fact"] = min(contab)
+        pagadas = [f for f in fac if f["estado"] == "Pagado" and f["fecha_pago"]]
+        facturado = sum(f["monto"] or 0 for f in fac)
+        completa = oc["estado"] == "Cerrado" or bool(oc["total"]) and facturado >= 0.995 * oc["total"]
+        # Fecha de pago: todas las facturas pagadas Y la orden cerrada o facturada al 100 % (si no, es un pago parcial)
+        if len(pagadas) == len(fac) and completa:
             d["fecha_pago"] = max(f["fecha_pago"] for f in pagadas)
+        elif len(pagadas) == len(fac):
+            d["sin_pago"] = "pago parcial: la OC sigue en proceso y no está facturada al 100 %"
+        else:
+            d["sin_pago"] = "hay facturas de la OC pendientes de pago"
     return d
 
 
-# Campos que se completan desde SAP cuando están vacíos
+def usos_oc(con):
+    """{N° de orden: [ids de requerimientos que la usan]}"""
+    usos = {}
+    for rid, orden in con.execute("SELECT id, orden FROM req WHERE orden IS NOT NULL ORDER BY id"):
+        usos.setdefault(orden, []).append(rid)
+    return usos
+
+
+# Campos que aporta SAP. Los que vinieron de SAP se mantienen al día; los escritos por el usuario no se tocan;
+# los vacíos se completan (salvo que el usuario los haya vaciado a propósito).
 CAMPOS_SAP = ["emision_oc", "aprob_oc", "proveedor", "monto", "moneda", "num_factura", "recepcion_fact", "fecha_pago"]
-# Campos vinculados: si la orden está en SAP, SAP manda siempre (lo aprobado en SAP es lo correcto)
+# Vinculados: si la orden está en SAP, SAP manda siempre (lo aprobado en SAP es lo correcto).
+# Excepción: el monto de una OC que comparten varios requerimientos (el total SAP es de la orden completa).
 CAMPOS_VINCULADOS = ["monto", "moneda"]
 
 
 def _distinto(campo, a, b):
+    a, b = _norm(a), _norm(b)
     if campo == "monto":
-        return a is None or b is None or abs(float(a) - float(b)) > 0.005
-    return (a or "") != (b or "")
+        return (a is None) != (b is None) or (a is not None and abs(float(a) - float(b)) > 0.005)
+    return a != b
 
 
 def completar_desde_sap(con, req_id=None, autor="Sistema"):
-    """Actualiza monto y moneda con SAP y rellena los demás campos vacíos.
-    Devuelve cuántos requerimientos cambiaron."""
+    """Sincroniza los requerimientos con su orden en el último reporte SAP. Devuelve cuántos cambiaron."""
     q = "SELECT * FROM req WHERE orden IS NOT NULL" + (" AND id=?" if req_id else "")
+    usos = usos_oc(con)
     cambiados = 0
     for r in con.execute(q, (req_id,) if req_id else ()).fetchall():
         d = datos_sap(con, r["orden"])
         if not d:
             continue
         desde = set(json.loads(r["desde_sap"] or "[]"))
+        manual = set(json.loads(r["manual"] or "[]"))
+        compartida = len(usos.get(r["orden"], [])) > 1
         llenados, actualizados = {}, {}
         for campo in CAMPOS_SAP:
-            v = d.get(campo)
-            if v in (None, ""):
+            v, actual = _norm(d.get(campo)), _norm(r[campo])
+            if campo == "monto" and compartida:
+                desde.discard("monto")       # se respeta el reparto del usuario entre los requerimientos
                 continue
-            if campo in CAMPOS_VINCULADOS:
+            if campo in CAMPOS_VINCULADOS or campo in desde:
+                if v is None:
+                    if campo in desde and actual is not None:      # SAP ya no tiene el dato: se limpia
+                        actualizados[campo] = None
+                        desde.discard(campo)
+                    continue
+                if _distinto(campo, actual, v):
+                    (llenados if actual is None else actualizados)[campo] = v
                 desde.add(campo)
-                if _distinto(campo, r[campo], v):
-                    (actualizados if r[campo] not in (None, "") else llenados)[campo] = v
-            elif r[campo] in (None, ""):
+            elif actual is None and v is not None and campo not in manual:
                 llenados[campo] = v
                 desde.add(campo)
         cambios = {**llenados, **actualizados}
         if cambios or sorted(desde) != json.loads(r["desde_sap"] or "[]"):
             sets = "".join(f"{k}=?, " for k in cambios)
+            vals = [("" if v is None and k != "monto" else v) for k, v in cambios.items()]
             con.execute(f"UPDATE req SET {sets}desde_sap=?, modificado=? WHERE id=?",
-                        [*cambios.values(), json.dumps(sorted(desde)), _ahora(), r["id"]])
-        ver = lambda k, v: fmt(v) if k in CAMPOS_FECHA else (f"{v:,.2f}" if k == "monto" else v)
+                        [*vals, json.dumps(sorted(desde)), _ahora(), r["id"]])
+        ver = lambda k, v: "(vacío)" if v in (None, "") else fmt(v) if k in CAMPOS_FECHA else (f"{v:,.2f}" if k == "monto" else v)
         if llenados:
             det = "; ".join(f"{ETIQUETAS[k]}: {ver(k, v)}" for k, v in llenados.items())
             evento(con, r["id"], f"Completado desde SAP (OC {r['orden']}): {det}", autor, "sistema")
         if actualizados:
             det = "; ".join(f"{ETIQUETAS[k]}: {ver(k, r[k])} → {ver(k, v)}" for k, v in actualizados.items())
-            evento(con, r["id"], f"Actualizado según lo aprobado en SAP (OC {r['orden']}): {det}", autor, "sistema")
+            if "fecha_pago" in actualizados and actualizados["fecha_pago"] is None and d["sin_pago"]:
+                det += f" ({d['sin_pago']})"
+            evento(con, r["id"], f"Actualizado según SAP (OC {r['orden']}): {det}", autor, "sistema")
         cambiados += bool(cambios)
     con.commit()
     return cambiados
@@ -345,40 +411,70 @@ def eventos(con, req_id):
 
 
 def siguiente_id(con):
-    return (con.execute("SELECT MAX(id) FROM req").fetchone()[0] or 0) + 1
+    """Siguiente COD libre: después del mayor de la base y del mayor numerado en el Excel importado."""
+    maximo = con.execute("SELECT MAX(id) FROM req").fetchone()[0] or 0
+    return max(maximo, int(config(con, "max_cod_excel") or 0)) + 1
 
 
 def guardar(con, valores, autor):
-    """Crea o actualiza un requerimiento; registra en el historial cada campo que cambia."""
+    """Crea o actualiza un requerimiento; registra en el historial cada campo que cambia.
+    valores['_sap']: campos que el formulario completó con «Traer de SAP» (quedan marcados como de SAP)."""
+    valores = dict(valores)
+    sap_form = set(valores.pop("_sap", ()))
     rid = valores.get("id")
     prev = con.execute("SELECT * FROM req WHERE id=?", (rid,)).fetchone() if rid else None
     campos = [c for c, _, _ in CAMPOS if c != "id"] + ["notas"]
     if prev is None:
         rid = rid or siguiente_id(con)
-        cols = ["id"] + campos + ["creado", "modificado"]
+        cols = ["id"] + campos + ["desde_sap", "creado", "modificado"]
         con.execute(f"INSERT INTO req({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
-                    [rid] + [valores.get(c) for c in campos] + [_ahora(), _ahora()])
+                    [rid] + [valores.get(c) for c in campos]
+                    + [json.dumps(sorted(sap_form & set(CAMPOS_SAP))), _ahora(), _ahora()])
         evento(con, rid, "Requerimiento registrado.", autor, "cambio")
     else:
         desde = set(json.loads(prev["desde_sap"] or "[]"))
+        manual = set(json.loads(prev["manual"] or "[]"))
         cambios = []
+        # El formulario muestra el monto con 2 decimales: si no se tocó, se conserva el valor original
+        if valores.get("monto") is not None and prev["monto"] is not None and not _distinto("monto", valores["monto"], prev["monto"]):
+            valores["monto"] = prev["monto"]
+        # Si cambia la orden, los datos que vinieron de SAP eran de la orden anterior: se limpian y se traen los nuevos
+        limpiados = set()
+        if _norm(valores.get("orden")) != _norm(prev["orden"]):
+            for c in desde - sap_form:
+                if not _distinto(c, valores.get(c), prev[c]):
+                    valores[c] = None if c == "monto" else ""
+                    limpiados.add(c)
+            desde -= limpiados
         for c in campos:
             nuevo, viejo = valores.get(c), prev[c]
-            if (nuevo or None) != (viejo or None):
-                ver = lambda v: (fmt(v) if c in CAMPOS_FECHA else (f"{v:,.2f}" if c == "monto" and v is not None else v)) or "(vacío)"
-                if c != "notas":
+            if _distinto(c, nuevo, viejo):
+                ver = lambda v: "(vacío)" if _norm(v) is None else (fmt(v) if c in CAMPOS_FECHA else (f"{v:,.2f}" if c == "monto" else v))
+                if c != "notas" and c not in limpiados:
                     cambios.append(f"{ETIQUETAS[c]}: {ver(viejo)} → {ver(nuevo)}")
-                desde.discard(c)      # editado a mano: ya no es dato de SAP
-        if not cambios and (valores.get("notas") or "") == (prev["notas"] or ""):
+                if c in sap_form:
+                    desde.add(c)
+                    manual.discard(c)
+                elif c not in limpiados:
+                    desde.discard(c)          # editado a mano: ya no es dato de SAP
+                    if c in CAMPOS_SAP:
+                        # vaciado a propósito: SAP no lo vuelve a llenar; con valor: es del usuario
+                        (manual.add if _norm(nuevo) is None else manual.discard)(c)
+        if limpiados:
+            cambios.append("se quitaron los datos SAP de la orden anterior ("
+                           + ", ".join(ETIQUETAS[c] for c in CAMPOS_SAP if c in limpiados) + ")")
+        if not cambios and _norm(valores.get("notas")) == _norm(prev["notas"]):
             return rid
         sets = ", ".join(f"{c}=?" for c in campos)
-        con.execute(f"UPDATE req SET {sets}, desde_sap=?, modificado=? WHERE id=?",
-                    [valores.get(c) for c in campos] + [json.dumps(sorted(desde)), _ahora(), rid])
+        con.execute(f"UPDATE req SET {sets}, desde_sap=?, manual=?, modificado=? WHERE id=?",
+                    [valores.get(c) for c in campos] + [json.dumps(sorted(desde)), json.dumps(sorted(manual)), _ahora(), rid])
         if cambios:
             evento(con, rid, "; ".join(cambios), autor, "cambio")
     con.commit()
     if valores.get("orden"):
         completar_desde_sap(con, rid)
+        if prev is None or _norm(valores.get("orden")) != _norm(prev["orden"]):
+            completar_desde_sap(con)      # otras que comparten la orden (el monto pasa a ser por requerimiento)
     return rid
 
 
@@ -392,12 +488,11 @@ def etapa(r):
     if r.get("sap_estado") in SAP_CIERRE and not r.get("sap_n_fact") and not r["num_factura"]:
         return SAP_CIERRE[r["sap_estado"]], ""
     for nombre, campo in reversed(ETAPAS):
-        if campo == "orden":
-            continue
         if r[campo]:
             return nombre, r[campo]
-    if r["orden"]:
-        return "OC por aprobar", r["emision_oc"] or r["f_solic"]
+        if campo == "emision_oc" and r["orden"]:
+            # Tiene N° de orden aunque no se haya registrado la fecha de emisión
+            return nombre, r["aprob_valo"] or r["envio_aprob_valo"] or r["envio_valo"] or r["f_solic"]
     return "Por valorizar", r["f_solic"]
 
 
@@ -462,9 +557,14 @@ def indicadores(filas):
 # Exportación a Excel
 # ---------------------------------------------------------------------------
 def exportar_excel(con, salida):
+    """Genera el Excel de seguimiento. Si `salida` está abierto en Excel, guarda una copia con la hora.
+    Devuelve la ruta realmente escrita."""
     import xlsxwriter
     filas = listar(con)
-    wb = xlsxwriter.Workbook(salida, {"default_format_properties": {"font_name": "Arial", "font_size": 10}})
+    destino, salida = salida, os.path.join(os.path.dirname(salida), f"~tmp_req_{os.getpid()}.xlsx")
+    # strings_to_formulas=False: un texto que empiece con «=» (nota, proveedor…) se guarda como texto
+    wb = xlsxwriter.Workbook(salida, {"default_format_properties": {"font_name": "Arial", "font_size": 10},
+                                      "strings_to_formulas": False})
     F = lambda **k: wb.add_format({"font_name": "Arial", "font_size": 10, **k})
     AZUL = "#1F3864"
     hdr = F(bold=True, font_color="white", bg_color=AZUL, text_wrap=True, valign="vcenter")
@@ -573,4 +673,9 @@ def exportar_excel(con, salida):
     ti.set_column("A:A", 42)
     ti.set_column("B:J", 13)
     wb.close()
-    return salida
+    try:
+        os.replace(salida, destino)
+    except PermissionError:          # el archivo del día está abierto en Excel
+        destino = destino.replace(".xlsx", f" ({datetime.now():%H%M%S}).xlsx")
+        os.replace(salida, destino)
+    return destino

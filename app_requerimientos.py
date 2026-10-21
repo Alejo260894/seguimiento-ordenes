@@ -25,19 +25,35 @@ def iso_desde_ddmm(s):
     return datetime.strptime(s, "%d/%m/%Y").strftime("%Y-%m-%d") if s else ""
 
 
+def leer_monto(s):
+    """Monto escrito como 1234.50, 1,234.50, 1234,50 o 1.234,50 -> float (ValueError si no es un número)."""
+    s = s.strip().replace(" ", "")
+    if not s:
+        return None
+    if "," in s and "." in s:                       # el último separador es el decimal
+        s = s.replace(".", "").replace(",", ".") if s.rfind(",") > s.rfind(".") else s.replace(",", "")
+    elif "," in s:                                  # solo comas: decimal si hay 1 o 2 dígitos al final
+        ent, _, dec = s.rpartition(",")
+        s = f"{ent.replace(',', '')}.{dec}" if len(dec) in (1, 2) and s.count(",") == 1 else s.replace(",", "")
+    return float(s)
+
+
 class Autocompletar:
-    """Lista desplegable de sugerencias bajo un Entry (busca por todas las palabras escritas)."""
+    """Lista desplegable de sugerencias bajo un Entry (busca por todas las palabras escritas).
+    ↓ para entrar en la lista, Enter o clic para elegir, Esc para cerrar."""
+    TECLAS_IGNORADAS = {"Down", "Up", "Return", "Escape", "Tab", "Left", "Right", "Home", "End", "Shift_L", "Shift_R",
+                        "Control_L", "Control_R", "Alt_L", "Alt_R", "Caps_Lock", "Win_L", "Win_R"}
 
     def __init__(self, entry, opciones, al_elegir=None, maximo=60):
         self.entry, self.opciones, self.al_elegir, self.maximo = entry, opciones, al_elegir, maximo
-        self.popup = None
+        self.popup = self.lb = None
         entry.bind("<KeyRelease>", self._tecla, add="+")
-        entry.bind("<FocusOut>", lambda e: entry.after(200, self._cerrar), add="+")
+        entry.bind("<FocusOut>", lambda e: entry.after(150, self._cerrar_si_sin_foco), add="+")
         entry.bind("<Down>", self._bajar, add="+")
         entry.bind("<Escape>", lambda e: self._cerrar(), add="+")
 
     def _tecla(self, e):
-        if e.keysym in ("Down", "Up", "Return", "Escape", "Tab"):
+        if e.keysym in self.TECLAS_IGNORADAS:
             return
         palabras = self.entry.get().lower().split()
         if not palabras:
@@ -53,7 +69,8 @@ class Autocompletar:
             self.lb.pack(fill="both", expand=True)
             self.lb.bind("<ButtonRelease-1>", self._elegir)
             self.lb.bind("<Return>", self._elegir)
-            self.lb.bind("<Escape>", lambda e: self._cerrar())
+            self.lb.bind("<Escape>", lambda e: (self._cerrar(), self.entry.focus_set()))
+            self.lb.bind("<FocusOut>", lambda e: self.entry.after(150, self._cerrar_si_sin_foco))
         x, y = self.entry.winfo_rootx(), self.entry.winfo_rooty() + self.entry.winfo_height()
         self.popup.geometry(f"{max(self.entry.winfo_width(), 520)}x{min(len(hits), 8) * 18 + 6}+{x}+{y}")
         self.lb.delete(0, "end")
@@ -63,11 +80,13 @@ class Autocompletar:
     def _bajar(self, e):
         if self.popup is not None:
             self.lb.focus_set()
+            self.lb.selection_clear(0, "end")
             self.lb.selection_set(0)
+            self.lb.activate(0)
             return "break"
 
     def _elegir(self, e=None):
-        sel = self.lb.curselection()
+        sel = self.lb.curselection() if self.lb is not None else ()
         if not sel:
             return
         valor = self.lb.get(sel[0])
@@ -79,10 +98,18 @@ class Autocompletar:
             self.entry.insert(0, valor)
         self.entry.focus_set()
 
+    def _cerrar_si_sin_foco(self):
+        try:
+            foco = self.entry.focus_get()
+        except KeyError:            # el foco está en un widget sin nombre (p. ej. otra aplicación)
+            foco = None
+        if foco not in (self.entry, self.lb):
+            self._cerrar()
+
     def _cerrar(self):
-        if self.popup is not None and self.popup.focus_get() is not getattr(self, "lb", None):
+        if self.popup is not None:
             self.popup.destroy()
-            self.popup = None
+            self.popup = self.lb = None
 
 
 class EditorReq(tk.Toplevel):
@@ -94,10 +121,22 @@ class EditorReq(tk.Toplevel):
         self.req = req or {}
         nuevo = not req
         self.title("Nuevo requerimiento" if nuevo else f"Requerimiento {req['id']:03d}")
-        self.geometry("1180x800")
+        # Tamaño ajustado a la pantalla (en portátiles o con zoom de Windows los botones deben verse)
+        ancho, alto = min(1180, self.winfo_screenwidth() - 40), min(800, self.winfo_screenheight() - 90)
+        self.geometry(f"{ancho}x{alto}+{max(0, (self.winfo_screenwidth() - ancho) // 2)}+10")
         self.transient(app)
         self.v = {}
         self.sap_lbl = {}
+        self._sap_form = {}            # campos que el formulario tomó de SAP: {campo: valor mostrado}
+        # Botonera primero y abajo: siempre visible aunque la ventana sea pequeña
+        pie = ttk.Frame(self, padding=(10, 0, 10, 10))
+        pie.pack(side="bottom", fill="x")
+        self.lbl_etapa = ttk.Label(pie, text="", font=("Segoe UI", 10, "bold"), foreground="#1F3864")
+        self.lbl_etapa.pack(side="left")
+        ttk.Button(pie, text="Cancelar", command=self.destroy).pack(side="right")
+        ttk.Button(pie, text="💾  Guardar  (Ctrl+G)", style="Accent.TButton", command=self.guardar).pack(side="right", padx=6)
+        self.bind("<Control-g>", lambda e: self.guardar())
+        self.bind("<Escape>", lambda e: self.destroy())
         cuerpo = ttk.Frame(self, padding=10)
         cuerpo.pack(fill="both", expand=True)
         cuerpo.columnconfigure(0, weight=1)
@@ -134,7 +173,7 @@ class EditorReq(tk.Toplevel):
         self._fecha(det, 3, 2, "fecha_fin", "Fecha fin:")
         self.w_vinc = {"monto": self._campo(det, 4, 0, "monto", "Monto:", ancho=14),
                        "moneda": self._combo(det, 4, 2, "moneda", "Moneda:", rq.MONEDAS)}
-        self.lbl_vinc = ttk.Label(det, text="", foreground="#2F5597")
+        self.lbl_vinc = ttk.Label(det, text="", foreground="#2F5597", wraplength=520, justify="left")
         self.lbl_vinc.grid(row=4, column=4, columnspan=2, sticky="w", padx=10)
 
         # ---- Flujos
@@ -148,7 +187,10 @@ class EditorReq(tk.Toplevel):
         fo.grid(row=1, column=1, sticky="nsew", pady=(8, 0), padx=(4, 0))
         ttk.Label(fo, text="N° de orden (SAP):").grid(row=0, column=0, sticky="w")
         self.v["orden"] = tk.StringVar()
-        ttk.Entry(fo, textvariable=self.v["orden"], width=14).grid(row=0, column=1, sticky="w")
+        e_orden = ttk.Entry(fo, textvariable=self.v["orden"], width=14)
+        e_orden.grid(row=0, column=1, sticky="w")
+        e_orden.bind("<FocusOut>", lambda e: self._mostrar_sap())      # al cambiar la orden se vuelve a vincular
+        e_orden.bind("<Return>", lambda e: self._mostrar_sap())
         ttk.Button(fo, text="⬇ Traer de SAP", command=self.traer_sap).grid(row=0, column=2, sticky="w", padx=6)
         self.lbl_sap = ttk.Label(fo, text="", foreground="#2F5597", wraplength=430, justify="left")
         self.lbl_sap.grid(row=4, column=0, columnspan=4, sticky="w", pady=(4, 0))
@@ -186,13 +228,6 @@ class EditorReq(tk.Toplevel):
         self.txt_hist.grid(row=0, column=0, sticky="nsew")
         self.txt_hist.tag_configure("cab", font=("Segoe UI", 8, "bold"), foreground="#1F3864")
         self.txt_hist.tag_configure("sis", foreground="#808080", font=("Segoe UI", 9, "italic"))
-
-        pie = ttk.Frame(self, padding=(10, 0, 10, 10))
-        pie.pack(fill="x")
-        self.lbl_etapa = ttk.Label(pie, text="", font=("Segoe UI", 10, "bold"), foreground="#1F3864")
-        self.lbl_etapa.pack(side="left")
-        ttk.Button(pie, text="Cancelar", command=self.destroy).pack(side="right")
-        ttk.Button(pie, text="💾  Guardar", style="Accent.TButton", command=self.guardar).pack(side="right", padx=6)
 
         self._cargar()
         self.grab_set()
@@ -273,14 +308,37 @@ class EditorReq(tk.Toplevel):
             self.lbl_proy.config(foreground="#C00000", text="Proyecto no encontrado en el catálogo (Consulta1).")
 
     def _vincular(self, d):
-        """Monto y moneda bloqueados con el valor aprobado en SAP cuando la orden está en el reporte."""
+        """Monto y moneda bloqueados con lo aprobado en SAP cuando la orden está en el reporte.
+        Si la OC la comparten varios requerimientos, el monto queda libre (cada uno registra su parte)."""
+        otros = []
+        if d:
+            otros = [rid for rid in rq.usos_oc(self.con).get(int(self.v["orden"].get()), []) if rid != self.req.get("id")]
         for campo, w in self.w_vinc.items():
-            if d and d.get(campo) not in (None, ""):
-                self.v[campo].set(f"{d[campo]:,.2f}" if campo == "monto" else d[campo])
+            if d and d.get(campo) not in (None, "") and not (campo == "monto" and otros):
+                valor = f"{d[campo]:,.2f}" if campo == "monto" else d[campo]
+                self.v[campo].set(valor)
+                self._sap_form[campo] = valor
                 w.config(state="disabled")
             else:
+                self._sap_form.pop(campo, None)
                 w.config(state="normal" if campo == "monto" else "readonly")
-        self.lbl_vinc.config(text="🔗 Vinculado a SAP (monto aprobado de la OC)" if d else "")
+        if not d:
+            texto = ""
+        elif otros:
+            suma = sum(r[0] or 0 for r in self.con.execute(
+                f"SELECT monto FROM req WHERE id IN ({','.join('?' * len(otros))})", otros))
+            try:
+                suma += leer_monto(self.v["monto"].get()) or 0
+            except ValueError:
+                pass
+            ok = abs(suma - (d["monto"] or 0)) < 0.01
+            texto = (f"⚠ OC compartida con el requerimiento {', '.join(f'{o:03d}' for o in otros)}: el total SAP "
+                     f"({d['moneda']} {d['monto'] or 0:,.2f}) es de la orden completa. Registra aquí solo la parte de "
+                     f"este requerimiento. Suma actual de los requerimientos: {suma:,.2f} "
+                     + ("✔ cuadra con SAP" if ok else "✘ no cuadra con SAP"))
+        else:
+            texto = "🔗 Monto y moneda vinculados a SAP (total aprobado de la OC)"
+        self.lbl_vinc.config(text=texto, foreground="#2F5597" if not otros else "#9C5700")
 
     def _mostrar_sap(self):
         for l in self.sap_lbl.values():
@@ -306,12 +364,14 @@ class EditorReq(tk.Toplevel):
         if not d:
             messagebox.showinfo("SAP", "Esa orden no está en el último reporte SAP cargado.", parent=self)
             return
-        llenados = ["Monto y moneda (vinculados)"] if d.get("monto") is not None else []
+        llenados = [rq.ETIQUETAS[c] + " (vinculado)" for c in rq.CAMPOS_VINCULADOS if c in self._sap_form]
         for campo in rq.CAMPOS_SAP:
             v = d.get(campo)
             if v in (None, "") or campo in rq.CAMPOS_VINCULADOS or self.v[campo].get().strip():
                 continue
-            self.v[campo].set(rq.fmt(v) if campo in rq.CAMPOS_FECHA else (f"{v:,.2f}" if campo == "monto" else v))
+            valor = rq.fmt(v) if campo in rq.CAMPOS_FECHA else str(v)
+            self.v[campo].set(valor)
+            self._sap_form[campo] = valor          # queda marcado como dato de SAP al guardar
             llenados.append(rq.ETIQUETAS[campo])
         messagebox.showinfo("SAP", ("Completado (solo campos vacíos): " + ", ".join(llenados)) if llenados
                             else "No había campos vacíos que completar con SAP.", parent=self)
@@ -326,19 +386,26 @@ class EditorReq(tk.Toplevel):
                 if tipo == "fecha":
                     vals[campo] = iso_desde_ddmm(s)
                 elif campo == "monto":
-                    vals[campo] = float(s.replace(",", "")) if s else None
+                    vals[campo] = leer_monto(s)
                 elif tipo == "int":
                     vals[campo] = int(s) if s else None
                 else:
                     vals[campo] = s.upper() if campo in ("estatus", "tipo", "proyecto") else s
         except ValueError:
-            messagebox.showwarning("Dato inválido", f"Revisa «{rq.ETIQUETAS[campo]}»: las fechas van como dd/mm/aaaa "
-                                                    f"y monto/orden como números.", parent=self)
+            messagebox.showwarning("Dato inválido", f"Revisa «{rq.ETIQUETAS[campo]}»: las fechas van como dd/mm/aaaa, "
+                                                    f"el monto como número (1234.50 o 1.234,50) y la orden solo con "
+                                                    f"dígitos.", parent=self)
             return
         vals["notas"] = self.txt_notas.get("1.0", "end").strip()
         if not vals["proyecto"] and not vals["referencia"]:
             messagebox.showwarning("Faltan datos", "Indica al menos el proyecto o la referencia.", parent=self)
             return
+        if vals["proyecto"] and vals["proyecto"] not in self.proyectos and not messagebox.askyesno(
+                "Proyecto no encontrado", f"«{vals['proyecto']}» no está en el catálogo de proyectos, así que no tendrá "
+                f"controller ni jefe de proyecto.\n\n¿Guardar de todas formas?", parent=self):
+            return
+        # Lo que el formulario tomó de SAP (y no se modificó a mano) queda marcado como dato de SAP
+        vals["_sap"] = [c for c, v in self._sap_form.items() if self.v[c].get().strip() == str(v).strip()]
         rid = rq.guardar(self.con, vals, self.app.cfg.get("autor", ""))
         self.app.refrescar_req()
         self.app.tree_req.selection_set(str(rid)) if self.app.tree_req.exists(str(rid)) else None
@@ -513,16 +580,20 @@ def editar(app):
 
 
 def _ruta_excel_req(app, preguntar=False):
+    """Ruta del Excel de seguimiento (catálogos). Se pide si no hay una guardada o si `preguntar`."""
     ruta = app.cfg.get("excel_req")
     if preguntar or not ruta or not os.path.exists(ruta):
         ruta = filedialog.askopenfilename(parent=app, title="Excel «SEGUIMIENTO DE REQUERIMIENTOS Y ORDENES»",
                                           initialdir=os.path.dirname(ruta) if ruta else app_base(app),
                                           filetypes=[("Excel", "*.xlsx")])
-        if not ruta:
-            return None
+    return ruta or None
+
+
+def _recordar_ruta(app, ruta):
+    """Se guarda la ruta solo cuando el Excel se pudo leer bien."""
+    if app.cfg.get("excel_req") != ruta:
         app.cfg["excel_req"] = ruta
         app.guardar_cfg()
-    return ruta
 
 
 def app_base(app):
@@ -536,8 +607,11 @@ def catalogos(app):
     try:
         n_p, n_v = rq.actualizar_catalogos(app.con, ruta)
     except Exception as e:  # noqa: BLE001
-        messagebox.showerror("Catálogos", f"No se pudo leer el Excel:\n{e}", parent=app)
+        app.con.rollback()
+        messagebox.showerror("Catálogos", f"No se pudo leer el Excel (los catálogos anteriores se mantienen):\n{e}",
+                             parent=app)
         return
+    _recordar_ruta(app, ruta)
     refrescar(app)
     messagebox.showinfo("Catálogos", f"Catálogos actualizados desde\n{os.path.basename(ruta)}:\n"
                                      f"• {n_p} proyectos (Consulta1)\n• {n_v} proveedores (PROVEEDORES + SAP)", parent=app)
@@ -549,22 +623,23 @@ def importar(app):
         return
     try:
         rq.actualizar_catalogos(app.con, ruta)
-        n = rq.importar_control(app.con, ruta, app.cfg.get("autor", "Importación"))
+        n, avisos = rq.importar_control(app.con, ruta, app.cfg.get("autor", "Importación"))
         c = rq.completar_desde_sap(app.con)
     except Exception as e:  # noqa: BLE001
-        messagebox.showerror("Importar", f"No se pudo importar:\n{e}", parent=app)
+        app.con.rollback()
+        messagebox.showerror("Importar", f"No se pudo importar (no se guardó nada):\n{e}", parent=app)
         return
+    _recordar_ruta(app, ruta)
     refrescar(app)
-    messagebox.showinfo("Importar", f"Se importaron {n} requerimientos nuevos de la tabla CONTROL "
-                                    f"(los COD que ya existían no se tocan).\n{c} se completaron con datos de SAP.", parent=app)
+    texto = (f"Se importaron {n} requerimientos nuevos de la tabla CONTROL (los COD que ya existían no se tocan).\n"
+             f"{c} se completaron con datos de SAP.")
+    if avisos:
+        texto += f"\n\n{len(avisos)} fechas no se pudieron leer y quedaron vacías:\n• " + "\n• ".join(avisos[:10])
+        texto += "\n…" if len(avisos) > 10 else ""
+    messagebox.showinfo("Importar", texto, parent=app)
 
 
 def exportar(app):
-    salida = os.path.join(app_base(app), f"Seguimiento requerimientos {date.today():%d_%m}.xlsx")
-    try:
-        rq.exportar_excel(app.con, salida)
-    except PermissionError:
-        salida = salida.replace(".xlsx", f" ({datetime.now():%H%M%S}).xlsx")
-        rq.exportar_excel(app.con, salida)
+    salida = rq.exportar_excel(app.con, os.path.join(app_base(app), f"Seguimiento requerimientos {date.today():%d_%m}.xlsx"))
     if messagebox.askyesno("Exportar", f"Se generó {os.path.basename(salida)}.\n\n¿Abrirlo en Excel?", parent=app):
         os.startfile(salida)

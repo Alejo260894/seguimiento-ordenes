@@ -65,11 +65,13 @@ def conectar(path):
     con = sqlite3.connect(path)
     con.row_factory = sqlite3.Row
     con.executescript(SCHEMA)
-    # Limpieza única: OCs que entraron ya Cerradas/Canceladas con reglas anteriores y nadie trabajó
-    sin_trabajo = """SELECT numero_oc FROM ordenes o WHERE estado_oc IN ('Cerrado','Cancelado') AND situacion='Activa'
-                     AND NOT EXISTS (SELECT 1 FROM comentarios c WHERE c.numero_oc=o.numero_oc AND c.tipo<>'sistema')"""
-    con.execute(f"DELETE FROM comentarios WHERE numero_oc IN ({sin_trabajo})")
-    con.execute(f"DELETE FROM ordenes WHERE numero_oc IN ({sin_trabajo})")
+    if con.execute("PRAGMA user_version").fetchone()[0] < 1:
+        # Limpieza única (versión 1): OCs que entraron ya Cerradas/Canceladas con reglas anteriores y nadie trabajó
+        sin_trabajo = """SELECT numero_oc FROM ordenes o WHERE estado_oc IN ('Cerrado','Cancelado') AND situacion='Activa'
+                         AND NOT EXISTS (SELECT 1 FROM comentarios c WHERE c.numero_oc=o.numero_oc AND c.tipo<>'sistema')"""
+        con.execute(f"DELETE FROM comentarios WHERE numero_oc IN ({sin_trabajo})")
+        con.execute(f"DELETE FROM ordenes WHERE numero_oc IN ({sin_trabajo})")
+        con.execute("PRAGMA user_version = 1")
     con.commit()
     return con
 
@@ -128,38 +130,54 @@ def sincronizar(con, df, fecha_reporte, archivo):
                      "Sistema", "sistema", fecha_ev)
         situacion, cierre = prev["situacion"], prev["fecha_cierre"]
         if situacion in CERRADAS_AUTO:
-            situacion, cierre = SIT_ACTIVA, ""
-            comentar(con, oc, f"Vuelve a seguimiento: la OC aparece sin factura vigente en reporte {rep_txt}.",
-                     "Sistema", "sistema", fecha_ev)
-            res["reabiertas"] += 1
+            if prev["estado_seg"] == "Cerrar sin factura":
+                # Se respeta la decisión del usuario de no seguir esta OC
+                situacion, cierre = SIT_SIN_FACT, rep
+                comentar(con, oc, f"La OC aparece otra vez sin factura vigente en reporte {rep_txt}; se mantiene "
+                                  f"«Cerrar sin factura».", "Sistema", "sistema", fecha_ev)
+            else:
+                situacion, cierre = SIT_ACTIVA, ""
+                comentar(con, oc, f"Vuelve a seguimiento: la OC aparece sin factura vigente en reporte {rep_txt}.",
+                         "Sistema", "sistema", fecha_ev)
+                res["reabiertas"] += 1
         con.execute("""UPDATE ordenes SET serie=?, usuario=?, proveedor=?, ruc=?, mon=?, total=?, fecha_oc=?, estado_oc=?,
                        situacion=?, fecha_cierre=?, facturas='', ultimo_visto=? WHERE numero_oc=?""",
                     (*snap, situacion, cierre, rep, int(oc)))
 
+    # OCs ya conocidas que no siguen «en proceso sin factura»: se reevalúan todas (también las cerradas antes)
+    seguibles_set = set(seguibles)
     recien_facturadas = set()
     for oc, prev in existentes.items():
-        if prev["situacion"] in CERRADAS_AUTO:
+        if oc in seguibles_set:
             continue
+        sit = prev["situacion"]
+        estado = cab.loc[oc, "Estado"] if oc in cab.index else prev["estado_oc"]
         if oc in fact.index:
+            if sit == SIT_FACTURADA:
+                if fact[oc] != prev["facturas"] or estado != prev["estado_oc"]:
+                    con.execute("UPDATE ordenes SET facturas=?, estado_oc=?, ultimo_visto=? WHERE numero_oc=?",
+                                (fact[oc], estado, rep, oc))
+                continue
             recien_facturadas.add(oc)
-            con.execute("UPDATE ordenes SET situacion=?, fecha_cierre=?, facturas=?, ultimo_visto=? WHERE numero_oc=?",
-                        (SIT_FACTURADA, rep, fact[oc], rep, oc))
+            con.execute("UPDATE ordenes SET situacion=?, estado_oc=?, fecha_cierre=?, facturas=?, ultimo_visto=? WHERE numero_oc=?",
+                        (SIT_FACTURADA, estado, rep, fact[oc], rep, oc))
             comentar(con, oc, f"Factura cargada en la OC: {fact[oc]} (detectado en reporte {rep_txt}). Seguimiento cerrado.",
                      "Sistema", "sistema", fecha_ev)
             res["facturadas"] += 1
         elif oc not in cab.index:
-            con.execute("UPDATE ordenes SET situacion=?, fecha_cierre=? WHERE numero_oc=?", (SIT_FUERA, rep, oc))
-            comentar(con, oc, f"La OC ya no aparece en el reporte {rep_txt}. Seguimiento cerrado.",
-                     "Sistema", "sistema", fecha_ev)
-            res["fuera"] += 1
-        elif cab.loc[oc, "Estado"] in ESTADOS_FINALES:
-            est = cab.loc[oc, "Estado"]
+            # Solo las activas pasan a «Fuera del reporte»; la decisión del usuario y los cierres anteriores se mantienen
+            if sit == SIT_ACTIVA:
+                con.execute("UPDATE ordenes SET situacion=?, fecha_cierre=? WHERE numero_oc=?", (SIT_FUERA, rep, oc))
+                comentar(con, oc, f"La OC ya no aparece en el reporte {rep_txt}. Seguimiento cerrado.",
+                         "Sistema", "sistema", fecha_ev)
+                res["fuera"] += 1
+        elif estado in ESTADOS_FINALES and sit != ESTADOS_FINALES[estado]:
             con.execute("UPDATE ordenes SET situacion=?, estado_oc=?, fecha_cierre=?, ultimo_visto=? WHERE numero_oc=?",
-                        (ESTADOS_FINALES[est], est, rep, rep, oc))
-            verbo = "se cerró" if est == "Cerrado" else "se canceló"
+                        (ESTADOS_FINALES[estado], estado, rep, rep, oc))
+            verbo = "se cerró" if estado == "Cerrado" else "se canceló"
             comentar(con, oc, f"La OC {verbo} en SAP sin factura (reporte {rep_txt}): ya no se facturará. Seguimiento cerrado.",
                      "Sistema", "sistema", fecha_ev)
-            res["cerradas_sap" if est == "Cerrado" else "canceladas_sap"] += 1
+            res["cerradas_sap" if estado == "Cerrado" else "canceladas_sap"] += 1
 
     _sincronizar_facturas(con, df, rep, rep_txt, fecha_ev, recien_facturadas, res)
     res["activas"] = con.execute("SELECT COUNT(*) FROM ordenes WHERE situacion=?", (SIT_ACTIVA,)).fetchone()[0]
@@ -183,6 +201,8 @@ def _sincronizar_facturas(con, df, rep, rep_txt, fecha_ev, recien_facturadas, re
     res.update(facturas_nuevas=0, facturas_pagadas=0)
     for _, r in df[df["N° Factura"] != ""].iterrows():
         clave = (r["RUC"], r["N° Factura"])
+        if clave in vistas:
+            continue      # una misma factura en varias OCs: se registra una vez (con la primera OC)
         vistas.add(clave)
         oc = int(r["Numero OC"])
         snap = (oc, r["Serie"], r["Usuario"], r["Proveedor"], r["Estado"], _iso(r["Fecha"]), r["Tipo"],
@@ -251,14 +271,19 @@ def actualizar_orden(con, oc, estado_seg, responsable, fecha_compromiso, autor):
     if (prev["fecha_compromiso"] or "") != fecha_compromiso:
         f = lambda s: datetime.strptime(s, "%Y-%m-%d").strftime("%d/%m/%Y") if s else "(vacío)"
         cambios.append(f"Fecha compromiso: {f(prev['fecha_compromiso'])} → {f(fecha_compromiso)}")
-    if not cambios:
-        return False
     situacion = prev["situacion"]
     if prev["situacion"] in (SIT_ACTIVA, SIT_SIN_FACT):
         situacion = SIT_SIN_FACT if estado_seg == "Cerrar sin factura" else SIT_ACTIVA
+    if situacion != prev["situacion"] and prev["estado_seg"] == estado_seg:
+        cambios.append(f"Situación: {prev['situacion']} → {situacion}")
+    if not cambios:
+        return False
+    if situacion == SIT_SIN_FACT:
+        cierre = prev["fecha_cierre"] if prev["situacion"] == SIT_SIN_FACT and prev["fecha_cierre"] else _ahora()
+    else:
+        cierre = "" if situacion == SIT_ACTIVA else prev["fecha_cierre"]
     con.execute("UPDATE ordenes SET estado_seg=?, responsable=?, fecha_compromiso=?, situacion=?, fecha_cierre=? WHERE numero_oc=?",
-                (estado_seg, responsable, fecha_compromiso, situacion,
-                 _ahora() if situacion == SIT_SIN_FACT else ("" if situacion == SIT_ACTIVA else prev["fecha_cierre"]), oc))
+                (estado_seg, responsable, fecha_compromiso, situacion, cierre, oc))
     comentar(con, oc, "; ".join(cambios), autor, "cambio")
     con.commit()
     return True

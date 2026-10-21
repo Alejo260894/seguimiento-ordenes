@@ -99,10 +99,11 @@ def leer_xlsx(path):
             elif isinstance(v, time) and meta["hora"] is None:
                 meta["hora"] = v
     if hdr_row is None:
-        sys.exit("No se encontró la fila de encabezados (Usuario, Numero OC, ...) en el xlsx.")
+        raise ValueError("El archivo no parece el reporte «Control de órdenes» de SAP: no se encontró la fila de "
+                         "encabezados (Usuario, Numero OC, …).")
     faltan = [h for h in HEADERS if h not in colmap]
     if faltan:
-        sys.exit(f"Faltan columnas en el xlsx: {faltan}")
+        raise ValueError(f"Al reporte de SAP le faltan columnas: {', '.join(faltan)}")
     data, descartes = [], []
     for i in range(hdr_row + 1, len(df)):
         fila = df.iloc[i]
@@ -136,9 +137,16 @@ def a_fecha(v):
 
 
 def a_hora(v):
+    """Hora del reporte; acepta 15:24:04, 15:24, 03:24:04 p. m., etc. Si no se reconoce, devuelve None."""
     if v is None or isinstance(v, time):
         return v
-    return datetime.strptime(_norm(v), "%H:%M:%S").time()
+    s = _norm(v).lower().replace("p. m.", "pm").replace("a. m.", "am").replace("p.m.", "pm").replace("a.m.", "am")
+    for fmt in ("%H:%M:%S", "%H:%M", "%I:%M:%S %p", "%I:%M %p", "%I:%M:%S%p", "%I:%M%p"):
+        try:
+            return datetime.strptime(s, fmt).time()
+        except ValueError:
+            pass
+    return None
 
 
 def a_numero(v):
@@ -363,9 +371,13 @@ def fecha_reporte(meta):
     """Fecha y hora del reporte SAP como datetime (o None)."""
     if meta["fecha"] is None:
         return None
-    f = a_fecha(meta["fecha"])
-    h = a_hora(meta["hora"]) if meta["hora"] is not None else time(0, 0)
-    return datetime.combine(f.date(), h)
+    try:
+        f = a_fecha(meta["fecha"])
+    except ValueError:
+        return None
+    if f is None:
+        return None
+    return datetime.combine(f.date(), a_hora(meta["hora"]) or time(0, 0))
 
 
 def escribir_libro(df, meta, log, salida, seguimiento=None, comentarios_oc=None):
@@ -377,7 +389,9 @@ def escribir_libro(df, meta, log, salida, seguimiento=None, comentarios_oc=None)
     L = Layout(usuarios, anios)
     n_prov = df.loc[df["Proveedor"] != "", "Proveedor"].str.upper().nunique()
 
-    wb = xlsxwriter.Workbook(salida, {"default_format_properties": {"font_name": "Arial", "font_size": 10}})
+    # strings_to_formulas=False: un comentario o responsable que empiece con «=» se guarda como texto
+    wb = xlsxwriter.Workbook(salida, {"default_format_properties": {"font_name": "Arial", "font_size": 10},
+                                      "strings_to_formulas": False})
     F = lambda **k: wb.add_format({"font_name": "Arial", "font_size": 10, **k})
     AZUL = "#1F3864"
     fmt = dict(
@@ -444,7 +458,7 @@ def escribir_libro(df, meta, log, salida, seguimiento=None, comentarios_oc=None)
             partes = [estado[oc]] if oc in estado else []
             if oc in com:
                 f, t = com[oc]
-                partes.append(f"{f[8:10]}/{f[5:7]}: {t}")
+                partes.append(f"{f[8:10]}/{f[5:7]}/{f[:4]}: {t}")
             seg_oc[oc] = " · ".join(partes)
         for i, oc in enumerate(df["Numero OC"], start=2):
             if oc in seg_oc:
@@ -695,14 +709,12 @@ def escribir_libro(df, meta, log, salida, seguimiento=None, comentarios_oc=None)
         top = F(valign="top")
         topd = F(valign="top", num_format="dd/mm/yyyy")
         topm = F(valign="top", num_format="#,##0.00")
-        venc = F(valign="top", num_format="dd/mm/yyyy", font_color="#9C0006", bold=True)
         hdr_wrap = F(bold=True, font_color="white", bg_color=AZUL, text_wrap=True, valign="vcenter")
         sg.set_row(3, 30)
         for j, (h, w) in enumerate(cols):
             sg.write(3, j, h, hdr_wrap)
             sg.set_column(j, j, w)
         d = lambda s: datetime.strptime(s[:10], "%Y-%m-%d") if s else None
-        hoy = datetime.now()
         for i, s in enumerate(seguimiento, start=4):
             fo = d(s["fecha_oc"])
             fc = d(s["fecha_compromiso"])
@@ -718,7 +730,7 @@ def escribir_libro(df, meta, log, salida, seguimiento=None, comentarios_oc=None)
             sg.write(i, 10, s["estado_seg"], top)
             sg.write(i, 11, s["responsable"] or "", top)
             if fc:
-                sg.write_datetime(i, 12, fc, venc if (fc < hoy and s["situacion"] == "Activa") else topd)
+                sg.write_datetime(i, 12, fc, topd)
             sg.write(i, 13, s["ult_com"] or "", wrap)
             uf = datetime.strptime(s["ult_fecha"], "%Y-%m-%d %H:%M:%S") if s["ult_fecha"] else None
             sg.write_datetime(i, 14, uf, topd) if uf else sg.write_blank(i, 14, None, topd)
@@ -736,6 +748,9 @@ def escribir_libro(df, meta, log, salida, seguimiento=None, comentarios_oc=None)
                                                       "format": wb.add_format({"bg_color": "#FFF2CC"})})
         sg.conditional_format(4, 9, 3 + max(n, 1), 9, {"type": "cell", "criteria": "==", "value": '"Facturada"',
                                                       "format": wb.add_format({"bg_color": "#E2EFDA"})})
+        # Compromiso vencido (se recalcula con la fecha del día al abrir el archivo)
+        sg.conditional_format(4, 12, 3 + max(n, 1), 12, {"type": "formula", "criteria": '=AND($J5="Activa",$M5<>"",$M5<TODAY())',
+                                                        "format": wb.add_format({"font_color": "#9C0006", "bold": True})})
 
     # ---------------- Calc_Graficos ----------------
     cg = wb.add_worksheet("Calc_Graficos")
@@ -806,6 +821,9 @@ def procesar(entrada, salida=None):
     else:
         data, meta, n_total, desc_lect = leer_xlsx(entrada)
     df, desc_conv = convertir(data)
+    if df.empty:
+        raise ValueError("El archivo no contiene órdenes: no parece el reporte «Control de órdenes» de SAP "
+                         "(o está vacío).")
     df_limpio, log = limpiar(df)
     log["descartes"] = desc_lect + desc_conv + log["descartes"]
     log["conteos"].insert(0, ("Filas físicas leídas del archivo", n_total))
@@ -818,7 +836,10 @@ def main():
     if len(sys.argv) != 3:
         sys.exit(__doc__)
     entrada, salida = sys.argv[1], sys.argv[2]
-    df, log, meta, _ = procesar(entrada, salida)
+    try:
+        df, log, meta, _ = procesar(entrada, salida)
+    except ValueError as e:
+        sys.exit(f"Error: {e}")
     print(f"Archivo: {entrada}  (reporte {meta['fecha']} {meta['hora']})")
     for c, v in log["conteos"]:
         print(f"  {c}: {v}")

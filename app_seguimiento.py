@@ -63,9 +63,22 @@ def guardar_cfg(cfg):
         json.dump(cfg, fh, ensure_ascii=False, indent=2)
 
 
-def generar_control(df, meta, log, con):
+def registrar_error(texto):
+    """Guarda el detalle técnico de un error en errores.log (junto a la aplicación)."""
+    try:
+        with open(os.path.join(BASE, "errores.log"), "a", encoding="utf-8") as fh:
+            fh.write(f"\n===== {datetime.now():%d/%m/%Y %H:%M:%S}\n{texto}\n")
+    except OSError:
+        pass
+
+
+def fecha_de(meta, ruta):
+    """Fecha y hora del reporte; si el archivo no la trae, la de modificación del archivo."""
+    return ps.fecha_reporte(meta) or datetime.fromtimestamp(os.path.getmtime(ruta))
+
+
+def generar_control(df, meta, log, con, fr):
     """Escribe 'Control de ordenes DD_MM.xlsx' con la hoja de seguimiento. Devuelve la ruta."""
-    fr = ps.fecha_reporte(meta) or datetime.now()
     salida = os.path.join(BASE, f"Control de ordenes {fr:%d_%m}.xlsx")
     tmp = os.path.join(BASE, f"~tmp_control_{os.getpid()}.xlsx")
     ps.escribir_libro(df, meta, log, tmp, seguimiento=sgm.tabla_para_excel(con),
@@ -78,31 +91,74 @@ def generar_control(df, meta, log, con):
     return salida
 
 
-def cargar_reporte(ruta):
-    """Limpia el reporte, archiva una copia en Cargas/, sincroniza el seguimiento y genera el control.
-    Devuelve (resultado_sincronización, ruta_control, log_limpieza)."""
+class ReporteIncompleto(Exception):
+    pass
+
+
+def preparar_carga(ruta):
+    """Paso 1 (no toca la base): limpia el reporte y revisa si parece completo.
+    Devuelve (df, log, meta, fecha_reporte, aviso); aviso != '' si faltan muchas órdenes respecto del anterior."""
     df, log, meta, _ = ps.procesar(ruta)
-    fr = ps.fecha_reporte(meta) or datetime.now()
-    os.makedirs(CARGAS, exist_ok=True)
-    archivo = os.path.join(CARGAS, f"Control de ordenes {fr:%Y-%m-%d %H%M}{os.path.splitext(ruta)[1]}")
-    shutil.copy2(ruta, archivo)
+    fr = fecha_de(meta, ruta)
     con = sgm.conectar(DB)
+    try:
+        rq.preparar(con)
+        previas = {r[0] for r in con.execute("SELECT numero_oc FROM sap_oc")}
+        ult = sgm.ultima_carga(con)
+    finally:
+        con.close()
+    aviso = ""
+    if previas and (ult is None or f"{fr:%Y-%m-%d %H:%M:%S}" >= ult["fecha_reporte"]):
+        faltan = previas - set(df["Numero OC"])
+        if len(faltan) > max(10, 0.05 * len(previas)):
+            aviso = (f"El reporte trae {df['Numero OC'].nunique()} órdenes y el anterior tenía {len(previas)}: faltan "
+                     f"{len(faltan)} órdenes que sí estaban antes.\n\nSi es un reporte filtrado o incompleto, esas "
+                     f"órdenes se cerrarían como «Fuera del reporte» y sus facturas se marcarían como no vigentes.")
+    return df, log, meta, fr, aviso
+
+
+def archivar(ruta, fr):
+    """Copia el reporte a Cargas\\ (historial). Si no se puede, devuelve la ruta original."""
+    archivo = os.path.join(CARGAS, f"Control de ordenes {fr:%Y-%m-%d %H%M}{os.path.splitext(ruta)[1]}")
+    try:
+        os.makedirs(CARGAS, exist_ok=True)
+        if not (os.path.exists(archivo) and os.path.samefile(ruta, archivo)):
+            shutil.copy2(ruta, archivo)
+        return archivo
+    except OSError:
+        return ruta
+
+
+def aplicar_carga(ruta, df, log, meta, fr):
+    """Paso 2: archiva el reporte, sincroniza el seguimiento y genera el control.
+    Devuelve (resultado, ruta_control o None si el reporte era anterior a la última carga, log)."""
+    archivo = archivar(ruta, fr)
+    con = sgm.conectar(DB)
+    salida = None
     try:
         res = sgm.sincronizar(con, df, fr, archivo)
         if not res["omitida"]:
             rq.preparar(con)
             rq.guardar_snapshot_sap(con, df)
             res["req_completados"] = rq.completar_desde_sap(con)
-        salida = generar_control(df, meta, log, con)
-        if not res["omitida"]:
+            salida = generar_control(df, meta, log, con, fr)
             con.execute("UPDATE cargas SET salida=? WHERE id=(SELECT MAX(id) FROM cargas)", (salida,))
             con.commit()
     finally:
         con.close()
-    cfg = leer_cfg()
-    cfg["ultimo_control"] = salida
-    guardar_cfg(cfg)
+    if salida:
+        cfg = leer_cfg()
+        cfg["ultimo_control"] = salida
+        guardar_cfg(cfg)
     return res, salida, log
+
+
+def cargar_reporte(ruta, forzar=False):
+    """Carga completa sin preguntas (modo --cargar). Un reporte que parece incompleto no se aplica."""
+    df, log, meta, fr, aviso = preparar_carga(ruta)
+    if aviso and not forzar:
+        raise ReporteIncompleto(aviso)
+    return aplicar_carga(ruta, df, log, meta, fr)
 
 
 class App(tk.Tk):
@@ -131,10 +187,35 @@ class App(tk.Tk):
         self.modo = "oc"                     # "oc" (pestaña OC sin factura) o "fac" (pestaña Facturas)
         self.orden = ("dias", True)
         self.orden_fac = ("dias_venc", False)
-        self.cola = queue.Queue()
+        self.borradores = {}                  # comentario sin enviar de cada OC
+        self._com_oc = None                   # OC a la que pertenece el texto del cuadro «Nuevo comentario»
+        self.sash = None                      # altura del panel de detalle al ocultarlo
+        self.ultima_carga_id = None
         self._ui()
+        self.bind_all("<F5>", lambda e: self.actualizar_vista())
+        self.bind("<Activate>", lambda e: self.after_idle(self._revisar_cambios_externos))
         self.after(100, self._pedir_autor)
         self.refrescar()
+
+    def report_callback_exception(self, exc, val, tb):
+        """Errores en botones: en el .exe no hay consola, así que se muestran y se guardan en errores.log."""
+        try:
+            self.con.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        registrar_error("".join(traceback.format_exception(exc, val, tb)))
+        messagebox.showerror("Error", f"No se pudo completar la acción:\n{val}\n\nEl detalle técnico quedó en "
+                                      f"errores.log, en la carpeta de la aplicación.", parent=self)
+
+    def actualizar_vista(self):
+        self._guardar_pendientes()
+        self.refrescar()
+
+    def _revisar_cambios_externos(self):
+        """Si una carga programada (--cargar) actualizó la base mientras la app estaba abierta, se refresca."""
+        u = sgm.ultima_carga(self.con)
+        if u is not None and u["id"] != self.ultima_carga_id:
+            self.actualizar_vista()
 
     # ------------------------------------------------------------------ UI
     def _ui(self):
@@ -266,7 +347,7 @@ class App(tk.Tk):
         self.txt_hist.tag_configure("sis", foreground="#808080", font=("Segoe UI", 9, "italic"))
         self.txt_hist.tag_configure("cambio", foreground="#7F6000", font=("Segoe UI", 9, "italic"))
 
-        der = ttk.LabelFrame(det, text="Nuevo comentario", padding=6)
+        der = self.lf_com = ttk.LabelFrame(det, text="Nuevo comentario", padding=6)
         der.grid(row=0, column=2, sticky="nsew")
         der.rowconfigure(0, weight=1)
         der.columnconfigure(0, weight=1)
@@ -313,6 +394,9 @@ class App(tk.Tk):
             if nombre and nombre.strip():
                 self.cfg["autor"] = nombre.strip()
                 guardar_cfg(self.cfg)
+            elif not self.cfg.get("autor") and defecto:
+                self.cfg["autor"] = defecto           # si se cancela, se firma con el usuario de Windows
+                guardar_cfg(self.cfg)
         self.lbl_autor.config(text=f"Comentarios como: {self.cfg.get('autor', '(sin nombre)')}")
 
     # ------------------------------------------------------------- datos
@@ -321,6 +405,7 @@ class App(tk.Tk):
         compradores = sorted({f["usuario"] for f in self.filas if f["usuario"]})
         self.v_comprador.widget.config(values=["Todos"] + compradores)
         u = sgm.ultima_carga(self.con)
+        self.ultima_carga_id = u["id"] if u else None
         if u:
             self.lbl_estado.config(text=f"Última carga: reporte SAP del {fmt_fecha(u['fecha_reporte'])} {u['fecha_reporte'][11:16]}"
                                         f" · cargado el {fmt_fecha(u['fecha_carga'])} {u['fecha_carga'][11:16]}"
@@ -332,6 +417,8 @@ class App(tk.Tk):
         self.pintar()
         self.pintar_fac()
         self.refrescar_req()
+        if self.oc_sel and self.modo in ("oc", "fac"):
+            self.mostrar_detalle()        # el panel refleja lo que acaba de cambiar (p. ej. tras una carga)
 
     def refrescar_req(self):
         ui_req.refrescar(self)
@@ -430,14 +517,20 @@ class App(tk.Tk):
         self.pintar_fac()
 
     def cambiar_pestana(self):
+        guardado = self._guardar_pendientes()
         self.modo = self.tabs[self.nb.select()]
         # El panel de detalle/comentarios es de las pestañas de OC y facturas
         visible = str(self.det) in self.paned.panes()
         if self.modo in ("oc", "fac") and not visible:
             self.paned.add(self.det, weight=2)
+            if self.sash:
+                self.after_idle(lambda: self.paned.sashpos(0, self.sash))
         elif self.modo in ("req", "ind") and visible:
+            self.sash = self.paned.sashpos(0)
             self.paned.forget(self.det)
         self.limpiar_detalle()
+        if guardado:
+            self.refrescar()
         if self.modo == "oc" and self.tree.selection():
             self.seleccionar()
         elif self.modo == "fac" and self.tree_fac.selection():
@@ -445,8 +538,9 @@ class App(tk.Tk):
 
     def seleccionar_fac(self):
         sel = self.tree_fac.selection()
-        if not sel or self.modo != "fac":
+        if not sel or self.modo != "fac" or sel[0] == self.fac_sel:
             return
+        self._guardar_borrador()
         self.fac_sel = sel[0]
         self.oc_sel = int(self.tree_fac.item(sel[0])["values"][0])
         self.mostrar_detalle()
@@ -518,6 +612,7 @@ class App(tk.Tk):
             self.tree.selection_set(str(self.oc_sel))
             self.tree.see(str(self.oc_sel))
         elif self.oc_sel:
+            self._guardar_pendientes()        # un filtro ocultó la OC: lo editado no se pierde
             self.limpiar_detalle()
 
     def ordenar(self, clave):
@@ -543,10 +638,26 @@ class App(tk.Tk):
         oc = int(sel[0])
         if oc == self.oc_sel and self.txt_hist.get("1.0", "end").strip():
             return
+        guardado = self._guardar_pendientes()      # lo editado en la OC anterior no se pierde
+        self._guardar_borrador()
         self.oc_sel = oc
-        self.mostrar_detalle()
+        if guardado:
+            self.refrescar()
+        else:
+            self.mostrar_detalle()
+
+    def _guardar_borrador(self):
+        """Guarda el comentario sin enviar de la OC que está en el cuadro, para recuperarlo al volver a ella."""
+        if self._com_oc:
+            texto = self.txt_com.get("1.0", "end").strip()
+            if texto:
+                self.borradores[self._com_oc] = texto
+            else:
+                self.borradores.pop(self._com_oc, None)
 
     def limpiar_detalle(self):
+        self._guardar_borrador()
+        self._com_oc = None
         self.oc_sel = None
         self.fac_sel = None
         self.lbl_oc.config(text="Selecciona una orden de la lista")
@@ -555,6 +666,8 @@ class App(tk.Tk):
             v.set("")
         self.btn_guardar.config(state="disabled")
         self.btn_com.config(state="disabled")
+        self.lf_com.config(text="Nuevo comentario")
+        self.txt_com.delete("1.0", "end")
         self.txt_hist.config(state="normal")
         self.txt_hist.delete("1.0", "end")
         self.txt_hist.config(state="disabled")
@@ -600,6 +713,12 @@ class App(tk.Tk):
             w.config(state=("readonly" if w is self.cb_det_seg else "normal") if editable else "disabled")
         self.btn_guardar.config(state="normal" if editable else "disabled")
         self.btn_com.config(state="normal")
+        if self._com_oc != self.oc_sel:         # cada OC conserva su propio borrador de comentario
+            self._guardar_borrador()
+            self.txt_com.delete("1.0", "end")
+            self.txt_com.insert("1.0", self.borradores.get(self.oc_sel, ""))
+            self._com_oc = self.oc_sel
+        self.lf_com.config(text=f"Nuevo comentario para la OC {self.oc_sel}")
         t = self.txt_hist
         t.config(state="normal")
         t.delete("1.0", "end")
@@ -611,60 +730,91 @@ class App(tk.Tk):
         t.config(state="disabled")
         t.see("end")
 
-    def guardar_orden(self):
-        if not self.oc_sel:
-            return
-        comp = self.v_det_comp.get().strip()
+    def _fila_sel(self):
+        return next((x for x in self.filas if x["numero_oc"] == self.oc_sel), None)
+
+    def _hay_pendientes(self):
+        """¿Hay cambios escritos en el panel (estado, responsable, compromiso) que aún no se guardaron?"""
+        if self.modo != "oc" or not self.oc_sel or str(self.btn_guardar.cget("state")) == "disabled":
+            return False
+        f = self._fila_sel()
+        if f is None:
+            return False
+        return (self.v_det_seg.get() != f["estado_seg"] or self.v_det_resp.get().strip() != (f["responsable"] or "")
+                or self.v_det_comp.get().strip() != fmt_fecha(f["fecha_compromiso"]))
+
+    def _guardar_pendientes(self):
+        """Guarda sin preguntar lo editado en el panel (al cambiar de OC, comentar, cargar…). True si guardó."""
+        return self._hay_pendientes() and self.guardar_orden(refrescar=False)
+
+    def guardar_orden(self, refrescar=True):
+        f = self._fila_sel()
+        if f is None:
+            return False
+        seg, resp, comp = self.v_det_seg.get(), self.v_det_resp.get().strip(), self.v_det_comp.get().strip()
         try:
             comp_iso = datetime.strptime(comp, "%d/%m/%Y").strftime("%Y-%m-%d") if comp else ""
         except ValueError:
-            messagebox.showwarning("Fecha inválida", "La fecha compromiso debe tener el formato dd/mm/aaaa.", parent=self)
-            return
-        if sgm.actualizar_orden(self.con, self.oc_sel, self.v_det_seg.get(), self.v_det_resp.get().strip(),
-                                comp_iso, self.cfg.get("autor", "")):
+            messagebox.showwarning("Fecha inválida", f"La fecha compromiso de la OC {self.oc_sel} debe tener el formato "
+                                                     f"dd/mm/aaaa. Esa fecha no se guardó.", parent=self)
+            if refrescar:
+                return False
+            comp_iso = f["fecha_compromiso"] or ""
+        if seg == "Cerrar sin factura" and f["estado_seg"] != seg and not messagebox.askyesno(
+                "Cerrar sin factura", f"¿Cerrar el seguimiento de la OC {self.oc_sel}?\n\nÚsalo cuando la orden no se va "
+                f"a facturar. Si más adelante llega una factura, la app la marcará como Facturada.", parent=self):
+            seg = f["estado_seg"]
+            self.v_det_seg.set(seg)
+        cambio = sgm.actualizar_orden(self.con, self.oc_sel, seg, resp, comp_iso, self.cfg.get("autor", ""))
+        if cambio and refrescar:
             self.refrescar()
-            self.mostrar_detalle()
+        return cambio
 
     def agregar_comentario(self):
         texto = self.txt_com.get("1.0", "end").strip()
         if not self.oc_sel or not texto:
             return
+        self._guardar_pendientes()            # lo editado en estado/responsable/compromiso también se guarda
         sgm.comentar(self.con, self.oc_sel, texto, self.cfg.get("autor", ""))
         self.con.commit()
         self.txt_com.delete("1.0", "end")
+        self.borradores.pop(self.oc_sel, None)
         self.refrescar()
-        self.mostrar_detalle()
 
     # ------------------------------------------------- carga / Excel
     def _en_segundo_plano(self, titulo, fn, al_terminar):
         win = tk.Toplevel(self)
         win.title(titulo)
         win.transient(self)
-        win.grab_set()
         win.resizable(False, False)
+        win.protocol("WM_DELETE_WINDOW", lambda: None)      # no se puede cerrar mientras trabaja
         ttk.Label(win, text=titulo + "\nEsto puede tardar unos segundos…", padding=16, justify="center").pack()
         pb = ttk.Progressbar(win, mode="indeterminate", length=320)
         pb.pack(padx=16, pady=(0, 16))
         pb.start(12)
         win.update_idletasks()
         win.geometry(f"+{self.winfo_rootx() + self.winfo_width() // 2 - 180}+{self.winfo_rooty() + 200}")
+        win.grab_set()
+        cola = queue.Queue()                                # una cola por tarea
 
         def run():
             try:
-                self.cola.put(("ok", fn()))
-            except Exception as e:  # noqa: BLE001 — se muestra al usuario
-                self.cola.put(("error", f"{e}\n\n{traceback.format_exc()}"))
+                cola.put(("ok", fn(), None))
+            except BaseException as e:  # noqa: BLE001 — cualquier error se muestra al usuario
+                cola.put(("error", e, traceback.format_exc()))
 
         def esperar():
             try:
-                estado, res = self.cola.get_nowait()
+                estado, res, detalle = cola.get_nowait()
             except queue.Empty:
                 self.after(150, esperar)
                 return
             win.grab_release()
             win.destroy()
             if estado == "error":
-                messagebox.showerror("Error", res[:3000], parent=self)
+                registrar_error(detalle)
+                extra = "" if isinstance(res, ValueError) else "\n\nEl detalle técnico quedó en errores.log."
+                messagebox.showerror("No se pudo completar", f"{res}{extra}", parent=self)
             else:
                 al_terminar(res)
 
@@ -672,6 +822,7 @@ class App(tk.Tk):
         self.after(150, esperar)
 
     def cargar_csv(self):
+        self._guardar_pendientes()
         inicial = self.cfg.get("ultimo_csv") or os.path.join(BASE, "Control de ordenes.csv")
         ruta = filedialog.askopenfilename(parent=self, title="Reporte 'Control de órdenes' descargado de SAP",
                                           initialdir=os.path.dirname(inicial), initialfile=os.path.basename(inicial),
@@ -681,16 +832,24 @@ class App(tk.Tk):
         self.cfg["ultimo_csv"] = ruta
         guardar_cfg(self.cfg)
 
+        def paso2(datos):
+            df, log, meta, fr, aviso = datos
+            if aviso and not messagebox.askyesno("¿Reporte completo?", aviso + "\n\n¿Cargarlo de todas formas?",
+                                                 icon="warning", default="no", parent=self):
+                return
+            self._en_segundo_plano("Actualizando el seguimiento", lambda: aplicar_carga(ruta, df, log, meta, fr), fin)
+
         def fin(r):
             res, salida, log = r
             self.cfg = leer_cfg()
             conteos = dict(log["conteos"])
-            msg = (f"Control generado:\n{os.path.basename(salida)}\n\n"
-                   f"Filas limpias: {conteos.get('Filas finales en Sheet1')} · OCs: {conteos.get('OCs distintas')}\n"
-                   f"Avisos de limpieza: {len(log['avisos'])} (ver hoja 'Log limpieza')\n\n")
+            msg = (f"Filas limpias: {conteos.get('Filas finales en Sheet1')} · OCs: {conteos.get('OCs distintas')}\n"
+                   f"Avisos de limpieza: {len(log['avisos'])} (ver hoja 'Log limpieza' del control)\n\n")
             if res["omitida"]:
-                msg += "⚠ " + res["motivo"]
+                msg += ("⚠ " + res["motivo"] + "\nTampoco se generó un control nuevo: el último control sigue siendo "
+                        "el más reciente.")
             else:
+                msg = f"Control generado:\n{os.path.basename(salida)}\n\n" + msg
                 msg += (f"Seguimiento actualizado:\n• {res['nuevas']} OCs nuevas sin factura\n"
                         f"• {res['facturadas']} OCs ya facturadas (cerradas)\n"
                         f"• {res.get('cerradas_sap', 0)} OCs cerradas y {res.get('canceladas_sap', 0)} canceladas en SAP "
@@ -700,12 +859,15 @@ class App(tk.Tk):
                         f"Facturas: {res.get('facturas_nuevas', 0)} nuevas · {res.get('facturas_pagadas', 0)} pagadas desde la carga anterior\n"
                         f"Requerimientos completados con datos de SAP: {res.get('req_completados', 0)}")
             self.refrescar()
-            if messagebox.askyesno("Carga completada", msg + "\n\n¿Abrir el control en Excel?", parent=self):
+            if salida is None:
+                messagebox.showwarning("Reporte no aplicado", msg, parent=self)
+            elif messagebox.askyesno("Carga completada", msg + "\n\n¿Abrir el control en Excel?", parent=self):
                 os.startfile(salida)
 
-        self._en_segundo_plano("Procesando reporte SAP", lambda: cargar_reporte(ruta), fin)
+        self._en_segundo_plano("Leyendo el reporte SAP", lambda: preparar_carga(ruta), paso2)
 
     def regenerar_excel(self):
+        self._guardar_pendientes()
         u = sgm.ultima_carga(self.con)
         if not u or not u["archivo"] or not os.path.exists(u["archivo"]):
             messagebox.showinfo("Sin reporte", "Primero carga un CSV de SAP.", parent=self)
@@ -715,7 +877,7 @@ class App(tk.Tk):
             df, log, meta, _ = ps.procesar(u["archivo"])
             con = sgm.conectar(DB)
             try:
-                return generar_control(df, meta, log, con)
+                return generar_control(df, meta, log, con, fecha_de(meta, u["archivo"]))
             finally:
                 con.close()
 
@@ -737,16 +899,24 @@ class App(tk.Tk):
 
 
 def main():
-    # Modo sin ventana (p. ej. desde el Programador de tareas):  "Seguimiento Ordenes.exe" --cargar archivo.csv
-    if len(sys.argv) == 3 and sys.argv[1] == "--cargar":
+    # Modo sin ventana (p. ej. desde el Programador de tareas):
+    #   "Seguimiento Ordenes.exe" --cargar archivo.csv [--forzar]
+    # --forzar aplica también un reporte que parece incompleto (sin --forzar se deja para revisarlo en la app).
+    if len(sys.argv) >= 3 and sys.argv[1] == "--cargar":
+        ahora = f"{datetime.now():%d/%m/%Y %H:%M}"
         with open(os.path.join(BASE, "ultima_carga.log"), "w", encoding="utf-8") as fh:
             try:
-                res, salida, log = cargar_reporte(sys.argv[2])
-                fh.write(f"{datetime.now():%d/%m/%Y %H:%M} OK\nControl: {salida}\nSeguimiento: {res}\n")
+                res, salida, log = cargar_reporte(sys.argv[2], forzar="--forzar" in sys.argv[3:])
+                estado = f"OMITIDO: {res['motivo']}" if res["omitida"] else "OK"
+                fh.write(f"{ahora} {estado}\nControl: {salida or '(no se generó)'}\nSeguimiento: {res}\n")
                 for c, v in log["conteos"]:
                     fh.write(f"  {c}: {v}\n")
-            except Exception:  # noqa: BLE001
-                fh.write(traceback.format_exc())
+            except ReporteIncompleto as e:
+                fh.write(f"{ahora} REVISAR: no se aplicó la carga.\n{e}\n\nCárgalo desde la aplicación para "
+                         f"confirmarlo, o vuelve a ejecutar con --forzar.\n")
+                sys.exit(2)
+            except BaseException:  # noqa: BLE001
+                fh.write(f"{ahora} ERROR\n{traceback.format_exc()}")
                 sys.exit(1)
         return
     try:

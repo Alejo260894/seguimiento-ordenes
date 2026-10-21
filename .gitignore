@@ -5,8 +5,10 @@
 *.db
 *.db-journal
 Cargas/
+Respaldos/
 config_seguimiento.json
 ultima_carga.log
+errores.log
 ~tmp_control_*
 
 # Ejecutable y artefactos de compilación (publicar el .exe como Release si hace falta)

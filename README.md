@@ -7,10 +7,13 @@ Reemplaza el llenado manual del Excel «SEGUIMIENTO DE REQUERIMIENTOS Y ORDENES�
   - **Proyecto** con autocompletado por código o nombre (catálogo Consulta1). Al elegirlo muestra el controller, el controller 2 y el jefe de proyecto.
   - **Proveedor** con autocompletado (hoja PROVEEDORES + proveedores de SAP).
 - Las fechas de cada flujo (valorización, orden, pago) tienen un botón **Hoy**.
-- Al poner el **N° de orden**, con **⬇ Traer de SAP** se completan los campos vacíos: emisión y aprobación de OC, proveedor, monto, moneda, factura, recepción (fecha de contabilización en SAP) y **fecha de pago** (cuando todas las facturas de la OC están pagadas).
-  - Esto también ocurre solo en cada carga de un CSV de SAP.
-  - Lo que viene de SAP queda marcado y nunca reemplaza un dato que escribiste.
-  - Junto a cada fecha se ve la fecha de SAP como referencia.
+- Al poner el **N° de orden**, con **⬇ Traer de SAP** se completan los campos vacíos: emisión y aprobación de OC, proveedor, factura y recepción (fecha de contabilización en SAP). Esto también ocurre solo en cada carga de un CSV de SAP. Reglas:
+  - **Lo que escribiste no se toca.** Si vacías a propósito un dato que vino de SAP, no se vuelve a llenar.
+  - **Lo que vino de SAP se mantiene al día**: si SAP cambia o deja de tener el dato, se actualiza, y queda en el historial.
+  - **Monto y moneda** se toman siempre de lo aprobado en SAP y aparecen bloqueados con 🔗. **Excepción**: si la OC la comparten varios requerimientos, el total SAP es de la orden completa, así que cada uno registra su parte. El formulario avisa si la suma cuadra con SAP.
+  - **Fecha de pago**: solo cuando todas las facturas están pagadas **y** la OC está cerrada o facturada al 100 %. Si no, es un pago parcial y la fecha no se llena.
+  - Si cambias el N° de orden, los datos que habían venido de SAP se reemplazan por los de la nueva OC.
+  - Junto a cada fecha se ve la fecha de SAP como referencia. Si la OC ya está en otro requerimiento, el formulario lo indica.
 - La **etapa** se calcula sola según la fecha más avanzada registrada: Por valorizar → Valo por enviar a aprobación → Valo en aprobación → OC por emitir → OC por aprobar → OC por enviar → Pendiente de factura → Factura recibida → Factura en validación → Por enviar a pago → Pendiente de pago → Pagado.
   - ESTATUS = COMPLETO o ANULADO cierra el requerimiento.
   - Una OC cerrada o cancelada en SAP sin factura también lo cierra.
@@ -29,7 +32,11 @@ Reemplaza el llenado manual del Excel «SEGUIMIENTO DE REQUERIMIENTOS Y ORDENES�
 ## Aplicación «Seguimiento Ordenes.exe» (uso diario)
 Para abrirla, haz doble clic en el `.exe`. No necesita Python. Tarda unos segundos en arrancar.
 
-1. **📥 Cargar CSV de SAP…**: elige el CSV (o el xlsx) descargado de SAP. La aplicación hace cuatro cosas:
+1. **📥 Cargar CSV de SAP…**: elige el CSV (o el xlsx) descargado de SAP.
+   - Si el reporte trae muchas menos órdenes que el anterior (reporte filtrado o incompleto), la app **pregunta antes de aplicarlo**.
+   - Un reporte **anterior** a la última carga no modifica nada ni genera un control nuevo.
+
+   La aplicación hace cuatro cosas:
    - limpia la data;
    - genera `Control de ordenes DD_MM.xlsx` en esta carpeta, con el mismo libro de siempre más la hoja **Seguimiento**;
    - guarda una copia del CSV en `Cargas\` para conservar el historial;
@@ -41,10 +48,10 @@ Para abrirla, haz doble clic en el `.exe`. No necesita Python. Tarda unos segund
      - si la factura se anula, la OC vuelve a seguimiento;
      - los cambios de Estado de la OC quedan registrados.
 2. **Seguimiento**: en la lista, elige una OC y completa:
-   - estado de seguimiento, responsable y fecha compromiso, y pulsa **Guardar cambios**;
+   - estado de seguimiento, responsable y fecha compromiso;
    - **comentarios**, con **Agregar comentario** o Ctrl+Enter.
 
-   Todo queda en el **Historial** con fecha y autor, y no se borra.
+   Lo que editas se guarda solo al cambiar de OC, al comentar o al cambiar de pestaña; **Guardar cambios** sigue disponible. Un comentario a medio escribir queda como borrador de **esa** OC. Todo queda en el **Historial** con fecha y autor, y no se borra.
 3. **Pestaña «Facturas»**: muestra todas las facturas del último reporte, una fila por factura.
    - Por defecto filtra **Pendiente de pago**. También puedes ver Pagado, Todos o (sin estado).
    - Otros filtros: comprador, estado de la OC, moneda, búsqueda, solo vencidas sin pagar y solo con comentarios.
@@ -63,15 +70,23 @@ Colores de la lista:
 
 Si eliges el estado **"Cerrar sin factura"**, la OC deja de estar activa. Úsalo cuando ya sabes que una OC en proceso no se va a facturar, aunque todavía no esté cerrada en SAP.
 
+**F5** actualiza la vista. Si una carga programada actualizó la base mientras la app estaba abierta, la vista se refresca sola al volver a la ventana.
+
 Archivos de la aplicación (deben quedarse junto al `.exe`):
 - `seguimiento.db`: comentarios e historial. **No lo borres.**
 - `config_seguimiento.json`: tu nombre y las últimas rutas.
 - `Cargas\`: copias de los reportes cargados.
+- `Respaldos\`: copias de seguridad de la base.
+- `errores.log`: detalle técnico de cualquier error (para revisarlo si algo falla).
 
 > La base está pensada para **una persona a la vez**. OneDrive sincroniza el archivo, pero si dos personas comentan al mismo tiempo desde equipos distintos, puede generarse un conflicto de versiones.
 
 **Carga automática (opcional)**: con el Programador de tareas de Windows puedes ejecutar
-`"Seguimiento Ordenes.exe" --cargar "C:\...\Control de ordenes.csv"`. El resultado queda en `ultima_carga.log`.
+`"Seguimiento Ordenes.exe" --cargar "C:\...\Control de ordenes.csv"`. El resultado queda en `ultima_carga.log`, que empieza con uno de estos estados:
+- **OK**: la carga se aplicó.
+- **OMITIDO**: el reporte era anterior a la última carga.
+- **REVISAR**: el reporte parecía incompleto y no se aplicó. Cárgalo desde la app para confirmarlo, o agrega `--forzar`.
+- **ERROR**: algo falló; el detalle está en el mismo log.
 
 **Recompilar el .exe** (solo si cambias el código):
 `python -m PyInstaller --onefile --windowed --name "Seguimiento Ordenes" --hidden-import python_calamine app_seguimiento.py`
