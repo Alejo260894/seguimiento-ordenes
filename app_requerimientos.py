@@ -132,8 +132,10 @@ class EditorReq(tk.Toplevel):
         self._combo(det, 2, 4, "estatus", "Estatus:", self._valores("estatus", list(rq.ESTATUS_CIERRE)), editable=True)
         self._fecha(det, 3, 0, "fecha_inicio", "Fecha inicio:")
         self._fecha(det, 3, 2, "fecha_fin", "Fecha fin:")
-        self._campo(det, 4, 0, "monto", "Monto:", ancho=14)
-        self._combo(det, 4, 2, "moneda", "Moneda:", rq.MONEDAS)
+        self.w_vinc = {"monto": self._campo(det, 4, 0, "monto", "Monto:", ancho=14),
+                       "moneda": self._combo(det, 4, 2, "moneda", "Moneda:", rq.MONEDAS)}
+        self.lbl_vinc = ttk.Label(det, text="", foreground="#2F5597")
+        self.lbl_vinc.grid(row=4, column=4, columnspan=2, sticky="w", padx=10)
 
         # ---- Flujos
         fv = ttk.LabelFrame(cuerpo, text="Flujo valorización", padding=8)
@@ -204,13 +206,17 @@ class EditorReq(tk.Toplevel):
     def _campo(self, parent, fila, col, campo, etiqueta, ancho=20):
         ttk.Label(parent, text=etiqueta).grid(row=fila, column=col, sticky="w")
         self.v[campo] = tk.StringVar()
-        ttk.Entry(parent, textvariable=self.v[campo], width=ancho).grid(row=fila, column=col + 1, sticky="w", pady=2)
+        w = ttk.Entry(parent, textvariable=self.v[campo], width=ancho)
+        w.grid(row=fila, column=col + 1, sticky="w", pady=2)
+        return w
 
     def _combo(self, parent, fila, col, campo, etiqueta, valores, editable=False):
         ttk.Label(parent, text=etiqueta).grid(row=fila, column=col, sticky="w", padx=(10 if col else 0, 0))
         self.v[campo] = tk.StringVar()
-        ttk.Combobox(parent, textvariable=self.v[campo], values=valores, width=22,
-                     state="normal" if editable else "readonly").grid(row=fila, column=col + 1, sticky="w", pady=2)
+        w = ttk.Combobox(parent, textvariable=self.v[campo], values=valores, width=22,
+                         state="normal" if editable else "readonly")
+        w.grid(row=fila, column=col + 1, sticky="w", pady=2)
+        return w
 
     def _fecha(self, parent, fila, col, campo, etiqueta):
         ttk.Label(parent, text=etiqueta).grid(row=fila, column=col, sticky="w", padx=(10 if col else 0, 0))
@@ -266,6 +272,16 @@ class EditorReq(tk.Toplevel):
         elif self.v["proyecto"].get().strip():
             self.lbl_proy.config(foreground="#C00000", text="Proyecto no encontrado en el catálogo (Consulta1).")
 
+    def _vincular(self, d):
+        """Monto y moneda bloqueados con el valor aprobado en SAP cuando la orden está en el reporte."""
+        for campo, w in self.w_vinc.items():
+            if d and d.get(campo) not in (None, ""):
+                self.v[campo].set(f"{d[campo]:,.2f}" if campo == "monto" else d[campo])
+                w.config(state="disabled")
+            else:
+                w.config(state="normal" if campo == "monto" else "readonly")
+        self.lbl_vinc.config(text="🔗 Vinculado a SAP (monto aprobado de la OC)" if d else "")
+
     def _mostrar_sap(self):
         for l in self.sap_lbl.values():
             l.config(text="")
@@ -273,6 +289,7 @@ class EditorReq(tk.Toplevel):
             d = rq.datos_sap(self.con, int(self.v["orden"].get())) if self.v["orden"].get().strip() else None
         except ValueError:
             d = None
+        self._vincular(d)
         if not d:
             self.lbl_sap.config(text="" if not self.v["orden"].get().strip() else "La orden no está en el último reporte SAP cargado.")
             return None
@@ -289,10 +306,10 @@ class EditorReq(tk.Toplevel):
         if not d:
             messagebox.showinfo("SAP", "Esa orden no está en el último reporte SAP cargado.", parent=self)
             return
-        llenados = []
+        llenados = ["Monto y moneda (vinculados)"] if d.get("monto") is not None else []
         for campo in rq.CAMPOS_SAP:
             v = d.get(campo)
-            if v in (None, "") or self.v[campo].get().strip():
+            if v in (None, "") or campo in rq.CAMPOS_VINCULADOS or self.v[campo].get().strip():
                 continue
             self.v[campo].set(rq.fmt(v) if campo in rq.CAMPOS_FECHA else (f"{v:,.2f}" if campo == "monto" else v))
             llenados.append(rq.ETIQUETAS[campo])
@@ -385,7 +402,7 @@ def construir(app, tab_req, tab_ind):
               font=("Segoe UI", 10, "bold"), padding=(6, 10, 6, 4)).pack(fill="x")
     app.tree_tiempos = ttk.Treeview(tab_ind, columns=("tramo", "n", "prom", "med", "max", "neg"), show="headings", height=9)
     for k, t, w, a in [("tramo", "Tramo", 320, "w"), ("n", "N°", 70, "e"), ("prom", "Promedio", 100, "e"),
-                       ("med", "Mediana", 100, "e"), ("max", "Máximo", 100, "e"), ("neg", "Fechas fuera de orden (revisar)", 200, "e")]:
+                       ("med", "Mediana", 100, "e"), ("max", "Máximo", 100, "e"), ("neg", "Anticipos / regularizaciones", 200, "e")]:
         app.tree_tiempos.heading(k, text=t)
         app.tree_tiempos.column(k, width=w, anchor=a, stretch=False)
     app.tree_tiempos.tag_configure("total", font=("Segoe UI", 9, "bold"))

@@ -19,7 +19,7 @@ Reemplaza el llenado manual del Excel «SEGUIMIENTO DE REQUERIMIENTOS Y ORDENES�
   - pendientes por etapa (N°, días promedio y máximo en la etapa, montos);
   - tiempos del flujo por tramo (N°, promedio, mediana, máximo).
 
-  Se pueden filtrar por tipo, controller y rango de meses. Las fechas fuera de orden (días negativos) se excluyen y se cuentan aparte para revisarlas.
+  Se pueden filtrar por tipo, controller y rango de meses. Los días negativos (anticipos o regularizaciones: la fecha es anterior a la orden) no entran en los promedios y se cuentan aparte.
 - **📤 Exportar Excel** genera `Seguimiento requerimientos DD_MM.xlsx` con tres hojas:
   - **CONTROL**: tus mismas columnas, más etapa, días, estado de la OC en SAP y último comentario de la OC;
   - **PENDIENTES**;

@@ -283,10 +283,19 @@ def datos_sap(con, orden):
 
 # Campos que se completan desde SAP cuando están vacíos
 CAMPOS_SAP = ["emision_oc", "aprob_oc", "proveedor", "monto", "moneda", "num_factura", "recepcion_fact", "fecha_pago"]
+# Campos vinculados: si la orden está en SAP, SAP manda siempre (lo aprobado en SAP es lo correcto)
+CAMPOS_VINCULADOS = ["monto", "moneda"]
+
+
+def _distinto(campo, a, b):
+    if campo == "monto":
+        return a is None or b is None or abs(float(a) - float(b)) > 0.005
+    return (a or "") != (b or "")
 
 
 def completar_desde_sap(con, req_id=None, autor="Sistema"):
-    """Rellena los campos vacíos con datos de SAP. Devuelve cuántos requerimientos cambiaron."""
+    """Actualiza monto y moneda con SAP y rellena los demás campos vacíos.
+    Devuelve cuántos requerimientos cambiaron."""
     q = "SELECT * FROM req WHERE orden IS NOT NULL" + (" AND id=?" if req_id else "")
     cambiados = 0
     for r in con.execute(q, (req_id,) if req_id else ()).fetchall():
@@ -294,20 +303,31 @@ def completar_desde_sap(con, req_id=None, autor="Sistema"):
         if not d:
             continue
         desde = set(json.loads(r["desde_sap"] or "[]"))
-        cambios = {}
+        llenados, actualizados = {}, {}
         for campo in CAMPOS_SAP:
             v = d.get(campo)
-            if v in (None, "") or (r[campo] not in (None, "")):
+            if v in (None, ""):
                 continue
-            cambios[campo] = v
-            desde.add(campo)
-        if cambios:
-            sets = ", ".join(f"{k}=?" for k in cambios)
-            con.execute(f"UPDATE req SET {sets}, desde_sap=?, modificado=? WHERE id=?",
+            if campo in CAMPOS_VINCULADOS:
+                desde.add(campo)
+                if _distinto(campo, r[campo], v):
+                    (actualizados if r[campo] not in (None, "") else llenados)[campo] = v
+            elif r[campo] in (None, ""):
+                llenados[campo] = v
+                desde.add(campo)
+        cambios = {**llenados, **actualizados}
+        if cambios or sorted(desde) != json.loads(r["desde_sap"] or "[]"):
+            sets = "".join(f"{k}=?, " for k in cambios)
+            con.execute(f"UPDATE req SET {sets}desde_sap=?, modificado=? WHERE id=?",
                         [*cambios.values(), json.dumps(sorted(desde)), _ahora(), r["id"]])
-            det = "; ".join(f"{ETIQUETAS[k]}: {fmt(v) if k in CAMPOS_FECHA else v}" for k, v in cambios.items())
+        ver = lambda k, v: fmt(v) if k in CAMPOS_FECHA else (f"{v:,.2f}" if k == "monto" else v)
+        if llenados:
+            det = "; ".join(f"{ETIQUETAS[k]}: {ver(k, v)}" for k, v in llenados.items())
             evento(con, r["id"], f"Completado desde SAP (OC {r['orden']}): {det}", autor, "sistema")
-            cambiados += 1
+        if actualizados:
+            det = "; ".join(f"{ETIQUETAS[k]}: {ver(k, r[k])} → {ver(k, v)}" for k, v in actualizados.items())
+            evento(con, r["id"], f"Actualizado según lo aprobado en SAP (OC {r['orden']}): {det}", autor, "sistema")
+        cambiados += bool(cambios)
     con.commit()
     return cambiados
 
@@ -533,9 +553,10 @@ def exportar_excel(con, salida):
     ti.hide_gridlines(2)
     ti.write("A1", "Tiempos del flujo (días)", titulo)
     ti.write("A2", "Calculados sobre las columnas DÍAS de la tabla CONTROL; solo cuentan los requerimientos con ambas "
-                   "fechas. Los días negativos (fechas fuera de orden) no entran en el cálculo: revísalos en CONTROL.", sub)
+                   "fechas. Los días negativos corresponden a anticipos o regularizaciones (la fecha es anterior a la "
+                   "orden): no entran en el promedio y se cuentan aparte.", sub)
     ti.write_row(3, 0, ["Tramo", "N°", "Promedio", "Mediana", "Máximo"] + [f"Promedio {t}" for t in TIPOS]
-                 + ["Negativos (revisar)"], hdr)
+                 + ["Anticipos / regularizaciones"], hdr)
     for i, t in enumerate(tramos):
         r = 4 + i
         colref = f"Tabla1[DÍAS: {t}]"
@@ -548,7 +569,7 @@ def exportar_excel(con, salida):
         for k, tp in enumerate(TIPOS):
             ti.write_formula(r, 5 + k, f'=IFERROR(AVERAGEIFS({colref},Tabla1[TIPO],"{tp}",{colref},">=0"),"-")',
                              F(num_format="0.0"))
-        ti.write_formula(r, 5 + len(TIPOS), f'=COUNTIFS({colref},"<0")', F(font_color="#C00000"))
+        ti.write_formula(r, 5 + len(TIPOS), f'=COUNTIFS({colref},"<0")', F(font_color="#7F7F7F"))
     ti.set_column("A:A", 42)
     ti.set_column("B:J", 13)
     wb.close()
