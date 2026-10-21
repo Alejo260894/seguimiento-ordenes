@@ -1,5 +1,31 @@
 # Control de órdenes: procesamiento del reporte SAP
 
+## Requerimientos e indicadores (pestañas «Requerimientos» e «Indicadores»)
+Reemplaza el llenado manual del Excel «SEGUIMIENTO DE REQUERIMIENTOS Y ORDENES». La app es la fuente; el Excel se exporta.
+
+- **➕ Nuevo requerimiento** abre un formulario con dos ayudas:
+  - **Proyecto** con autocompletado por código o nombre (catálogo Consulta1). Al elegirlo muestra el controller, el controller 2 y el jefe de proyecto.
+  - **Proveedor** con autocompletado (hoja PROVEEDORES + proveedores de SAP).
+- Las fechas de cada flujo (valorización, orden, pago) tienen un botón **Hoy**.
+- Al poner el **N° de orden**, con **⬇ Traer de SAP** se completan los campos vacíos: emisión y aprobación de OC, proveedor, monto, moneda, factura, recepción (fecha de contabilización en SAP) y **fecha de pago** (cuando todas las facturas de la OC están pagadas).
+  - Esto también ocurre solo en cada carga de un CSV de SAP.
+  - Lo que viene de SAP queda marcado y nunca reemplaza un dato que escribiste.
+  - Junto a cada fecha se ve la fecha de SAP como referencia.
+- La **etapa** se calcula sola según la fecha más avanzada registrada: Por valorizar → Valo por enviar a aprobación → Valo en aprobación → OC por emitir → OC por aprobar → OC por enviar → Pendiente de factura → Factura recibida → Factura en validación → Por enviar a pago → Pendiente de pago → Pagado.
+  - ESTATUS = COMPLETO o ANULADO cierra el requerimiento.
+  - Una OC cerrada o cancelada en SAP sin factura también lo cierra.
+- La lista muestra por defecto los **pendientes hasta el envío de la OC**, resaltados. Filtros: etapa, tipo, controller, mes y búsqueda. Doble clic para editar. Cada cambio queda en el historial del requerimiento.
+- **Indicadores**:
+  - pendientes por etapa (N°, días promedio y máximo en la etapa, montos);
+  - tiempos del flujo por tramo (N°, promedio, mediana, máximo).
+
+  Se pueden filtrar por tipo, controller y rango de meses. Las fechas fuera de orden (días negativos) se excluyen y se cuentan aparte para revisarlas.
+- **📤 Exportar Excel** genera `Seguimiento requerimientos DD_MM.xlsx` con tres hojas:
+  - **CONTROL**: tus mismas columnas, más etapa, días, estado de la OC en SAP y último comentario de la OC;
+  - **PENDIENTES**;
+  - **TIEMPOS**: con fórmulas sobre la tabla.
+- **📚 Actualizar catálogos** relee Consulta1 y PROVEEDORES del Excel de seguimiento (ruta guardada en la configuración). **📥 Importar desde Excel…** agrega solo los COD que todavía no existen.
+
 ## Aplicación «Seguimiento Ordenes.exe» (uso diario)
 Para abrirla, haz doble clic en el `.exe`. No necesita Python. Tarda unos segundos en arrancar.
 

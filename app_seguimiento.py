@@ -21,6 +21,8 @@ from tkinter import ttk, filedialog, messagebox, simpledialog
 
 import procesar_sap as ps
 import seguimiento as sgm
+import requerimientos as rq
+import app_requerimientos as ui_req
 
 BASE = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
 DB = os.path.join(BASE, "seguimiento.db")
@@ -87,6 +89,10 @@ def cargar_reporte(ruta):
     con = sgm.conectar(DB)
     try:
         res = sgm.sincronizar(con, df, fr, archivo)
+        if not res["omitida"]:
+            rq.preparar(con)
+            rq.guardar_snapshot_sap(con, df)
+            res["req_completados"] = rq.completar_desde_sap(con)
         salida = generar_control(df, meta, log, con)
         if not res["omitida"]:
             con.execute("UPDATE cargas SET salida=? WHERE id=(SELECT MAX(id) FROM cargas)", (salida,))
@@ -102,7 +108,7 @@ def cargar_reporte(ruta):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Seguimiento de órdenes y facturas")
+        self.title("Seguimiento de requerimientos, órdenes y facturas")
         self.geometry("1500x880")
         self.minsize(1100, 650)
         style = ttk.Style(self)
@@ -114,7 +120,10 @@ class App(tk.Tk):
         style.configure("Accent.TButton", font=("Segoe UI", 9, "bold"))
 
         self.cfg = leer_cfg()
+        self.base = BASE
+        self.guardar_cfg = lambda: guardar_cfg(self.cfg)
         self.con = sgm.conectar(DB)
+        rq.preparar(self.con)
         self.filas = []
         self.facturas = []
         self.oc_sel = None
@@ -142,14 +151,20 @@ class App(tk.Tk):
         self.lbl_estado = ttk.Label(self, padding=(10, 0), foreground="#1F3864")
         self.lbl_estado.pack(fill="x")
 
-        paned = ttk.PanedWindow(self, orient="vertical")
+        paned = self.paned = ttk.PanedWindow(self, orient="vertical")
         paned.pack(fill="both", expand=True, padx=8, pady=(4, 8))
         self.nb = ttk.Notebook(paned)
         paned.add(self.nb, weight=3)
+        tab_req = ttk.Frame(self.nb)
         tab_oc = ttk.Frame(self.nb)
         tab_fac = ttk.Frame(self.nb)
+        tab_ind = ttk.Frame(self.nb)
+        self.nb.add(tab_req, text="  Requerimientos  ")
         self.nb.add(tab_oc, text="  OC sin factura (en proceso)  ")
         self.nb.add(tab_fac, text="  Facturas (pendientes de pago / pagadas)  ")
+        self.nb.add(tab_ind, text="  Indicadores  ")
+        self.tabs = {str(tab_req): "req", str(tab_oc): "oc", str(tab_fac): "fac", str(tab_ind): "ind"}
+        ui_req.construir(self, tab_req, tab_ind)
         self.nb.bind("<<NotebookTabChanged>>", lambda e: self.cambiar_pestana())
 
         filt = ttk.Frame(tab_oc, padding=(4, 6))
@@ -209,7 +224,7 @@ class App(tk.Tk):
         self.tree_fac.tag_configure("fuera", foreground="#808080")
         self.tree_fac.bind("<<TreeviewSelect>>", lambda e: self.seleccionar_fac())
 
-        det = ttk.Frame(paned, padding=(0, 6, 0, 0))
+        det = self.det = ttk.Frame(paned, padding=(0, 6, 0, 0))
         paned.add(det, weight=2)
         det.columnconfigure(1, weight=3)
         det.columnconfigure(2, weight=2)
@@ -316,6 +331,10 @@ class App(tk.Tk):
         self.vf_comprador.widget.config(values=["Todos"] + sorted({f["usuario"] for f in self.facturas if f["usuario"]}))
         self.pintar()
         self.pintar_fac()
+        self.refrescar_req()
+
+    def refrescar_req(self):
+        ui_req.refrescar(self)
 
     # -------------------------------------------------- pestaña Facturas
     def filtradas_fac(self):
@@ -411,7 +430,13 @@ class App(tk.Tk):
         self.pintar_fac()
 
     def cambiar_pestana(self):
-        self.modo = "oc" if self.nb.index(self.nb.select()) == 0 else "fac"
+        self.modo = self.tabs[self.nb.select()]
+        # El panel de detalle/comentarios es de las pestañas de OC y facturas
+        visible = str(self.det) in self.paned.panes()
+        if self.modo in ("oc", "fac") and not visible:
+            self.paned.add(self.det, weight=2)
+        elif self.modo in ("req", "ind") and visible:
+            self.paned.forget(self.det)
         self.limpiar_detalle()
         if self.modo == "oc" and self.tree.selection():
             self.seleccionar()
@@ -672,7 +697,8 @@ class App(tk.Tk):
                         f"sin factura (salen del seguimiento)\n"
                         f"• {res['fuera']} fuera del reporte\n"
                         f"• {res['reabiertas']} reabiertas\n• {res['activas']} en seguimiento activo\n\n"
-                        f"Facturas: {res.get('facturas_nuevas', 0)} nuevas · {res.get('facturas_pagadas', 0)} pagadas desde la carga anterior")
+                        f"Facturas: {res.get('facturas_nuevas', 0)} nuevas · {res.get('facturas_pagadas', 0)} pagadas desde la carga anterior\n"
+                        f"Requerimientos completados con datos de SAP: {res.get('req_completados', 0)}")
             self.refrescar()
             if messagebox.askyesno("Carga completada", msg + "\n\n¿Abrir el control en Excel?", parent=self):
                 os.startfile(salida)
