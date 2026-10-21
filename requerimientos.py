@@ -12,6 +12,7 @@ import json
 import numbers
 import os
 import shutil
+import sqlite3
 import tempfile
 from datetime import date, datetime, timedelta
 
@@ -40,7 +41,7 @@ ETIQUETAS = {
     "emision_oc": "Emisión de orden", "aprob_oc": "Aprobación de orden", "envio_oc": "Envío de orden",
     "orden": "N° de orden", "recepcion_fact": "Recepción de factura", "envio_aprob_fact": "Envío de aprobación de factura",
     "validacion_fact": "Validación de factura", "num_factura": "N° de factura", "envio_pago": "Envío para pago",
-    "fecha_pago": "Fecha de pago", "notas": "Notas",
+    "fecha_pago": "Fecha de pago", "notas": "Notas", "comprador": "Comprador",
 }
 TIPOS = ["RQ", "VALO", "VUELO", "RH"]
 MONEDAS = ["PEN", "USD", "CAD", "AUD", "GBP", "EUR", "ZAR"]
@@ -125,7 +126,29 @@ def preparar(con):
     con.executescript(SCHEMA)
     _agregar_columna(con, "sap_fact", "monto", "REAL")               # FT Sin Imp. de cada factura
     _agregar_columna(con, "req", "manual", "TEXT DEFAULT '[]'")      # campos que el usuario vació a propósito
+    if "comprador" not in {r[1] for r in con.execute("PRAGMA table_info(req)")}:
+        # Base compartida entre compradores: cada requerimiento tiene su comprador (mismo nombre que «Usuario» en SAP)
+        con.execute("ALTER TABLE req ADD COLUMN comprador TEXT DEFAULT ''")
+        con.execute("ALTER TABLE req ADD COLUMN cod_excel INTEGER")     # COD original en el Excel importado
+        con.execute("""UPDATE req SET comprador=COALESCE((SELECT usuario FROM sap_oc s WHERE s.numero_oc=req.orden), '')""")
+        mayor = con.execute("SELECT comprador FROM req WHERE comprador<>'' GROUP BY comprador "
+                            "ORDER BY COUNT(*) DESC LIMIT 1").fetchone()
+        if mayor:       # hasta ahora la base era de un solo comprador: los que no tienen OC en SAP son suyos
+            con.execute("UPDATE req SET comprador=? WHERE comprador=''", (mayor[0],))
+        con.execute("UPDATE req SET cod_excel=id WHERE id IN (SELECT req_id FROM req_eventos "
+                    "WHERE texto LIKE 'Importado desde el Excel%')")
     con.commit()
+
+
+def compradores(con):
+    """Compradores conocidos: los de SAP (columna Usuario) y los asignados a requerimientos."""
+    nombres = {r[0] for r in con.execute("SELECT DISTINCT usuario FROM sap_oc WHERE usuario<>''")}
+    nombres |= {r[0] for r in con.execute("SELECT DISTINCT comprador FROM req WHERE comprador<>''")}
+    return sorted(nombres)
+
+
+class EdicionSimultanea(Exception):
+    """Otro usuario (o una carga de SAP) modificó el requerimiento mientras se editaba."""
 
 
 def config(con, clave, valor=None):
@@ -220,7 +243,8 @@ def actualizar_catalogos(con, ruta_excel, sap_df=None):
             filas.append((cod, _txt(r[col("NOMBRE")]), _txt(r[col("NOMBRE CORTO")]), _txt(r[col("ESTADO")]),
                           _txt(r[col("CLIENTE")]), _txt(r[col("RESPONSABLE")]), _txt(r[col("CONTROL PLANNER 1")]),
                           _txt(r[col("CONTROL PLANNER 2")])))
-    prov = {}
+    # Proveedores: se suman a los que ya había (cada comprador puede tener su propio Excel con su lista)
+    prov = {r[0].upper(): tuple(r) for r in con.execute("SELECT nombre, ruc, origen FROM cat_proveedores")}
     for _, r in pv.iterrows():
         n = _txt(r.get("RazonSocial"))
         if n:
@@ -240,42 +264,52 @@ def actualizar_catalogos(con, ruta_excel, sap_df=None):
     return len(filas), len(prov)
 
 
-def importar_control(con, ruta_excel, autor="Importación"):
-    """Importa la tabla CONTROL del Excel. Solo agrega los COD que no existan en la base.
-    Devuelve (nuevos, avisos). Todo o nada: si algo falla no queda nada a medias."""
+def importar_control(con, ruta_excel, autor="Importación", comprador=""):
+    """Importa la tabla CONTROL del Excel como requerimientos de `comprador`. Solo agrega los COD que ese comprador
+    aún no tiene en la base. Si algún COD ya lo usa otro requerimiento, las filas nuevas se numeran a continuación
+    del mayor COD (el original queda en cod_excel y en el historial).
+    Devuelve (nuevos, avisos, renumerados). Todo o nada: si algo falla no queda nada a medias."""
     tmp = _copia_lectura(ruta_excel)
     try:
         c = pd.read_excel(tmp, sheet_name="CONTROL", header=1, dtype=object)
     finally:
         os.remove(tmp)
     c.columns = [_txt(x) for x in c.columns]
-    existentes = {r[0] for r in con.execute("SELECT id FROM req")}
-    nuevos, avisos, max_cod = 0, [], 0
+    ya = {r[0] for r in con.execute("SELECT cod_excel FROM req WHERE comprador=? AND cod_excel IS NOT NULL", (comprador,))}
+    filas, avisos, max_cod = [], [], 0
+    for _, r in c.iterrows():
+        cod = _int(r.get("COD"))
+        if cod is None:
+            continue
+        max_cod = max(max_cod, cod)      # incluye las filas ya numeradas pero vacías
+        if cod in ya or not any(_txt(r.get(h)) for _, h, _ in CAMPOS[1:]):
+            continue
+        valores = {}
+        for campo, enc, tipo in CAMPOS:
+            v = r.get(enc)
+            valores[campo] = (_iso(v) if tipo == "fecha" else _num(v) if tipo == "num"
+                              else _int(v) if tipo == "int" else _txt(v))
+            if tipo == "fecha" and not valores[campo] and _txt(v):
+                avisos.append(f"COD {cod:03d}: «{enc}» = {_txt(v)!r} no es una fecha válida (quedó vacía)")
+        valores["estatus"] = valores["estatus"].upper()
+        ya.add(cod)
+        filas.append((cod, valores))
     with con:
-        for _, r in c.iterrows():
-            cod = _int(r.get("COD"))
-            if cod is None:
-                continue
-            max_cod = max(max_cod, cod)      # incluye las filas ya numeradas pero vacías
-            if cod in existentes or not any(_txt(r.get(h)) for _, h, _ in CAMPOS[1:]):
-                continue
-            valores = {}
-            for campo, enc, tipo in CAMPOS:
-                v = r.get(enc)
-                valores[campo] = (_iso(v) if tipo == "fecha" else _num(v) if tipo == "num"
-                                  else _int(v) if tipo == "int" else _txt(v))
-                if tipo == "fecha" and not valores[campo] and _txt(v):
-                    avisos.append(f"COD {cod:03d}: «{enc}» = {_txt(v)!r} no es una fecha válida (quedó vacía)")
-            valores["id"] = cod
-            valores["estatus"] = valores["estatus"].upper()
+        usados = {r[0] for r in con.execute("SELECT id FROM req")}
+        renumerar = any(cod in usados for cod, _ in filas)
+        siguiente = siguiente_id(con)
+        for cod, valores in sorted(filas, key=lambda x: x[0]):
+            if renumerar:
+                valores["id"], siguiente = siguiente, siguiente + 1
+            valores.update(comprador=comprador, cod_excel=cod)
             cols = list(valores) + ["creado", "modificado"]
             con.execute(f"INSERT INTO req({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
                         [valores[k] for k in valores] + [_ahora(), _ahora()])
-            evento(con, cod, "Importado desde el Excel de seguimiento.", autor, "sistema")
-            existentes.add(cod)
-            nuevos += 1
-        config(con, "max_cod_excel", max(max_cod, int(config(con, "max_cod_excel") or 0)))
-    return nuevos, avisos
+            evento(con, valores["id"], "Importado desde el Excel de seguimiento"
+                   + (f" (COD original en el Excel: {cod:03d})." if renumerar else "."), autor, "sistema")
+        if not renumerar:    # los COD se conservaron: los vacíos ya numerados en el Excel no se reutilizan
+            config(con, "max_cod_excel", max(max_cod, int(config(con, "max_cod_excel") or 0)))
+    return len(filas), avisos, renumerar
 
 
 # ---------------------------------------------------------------------------
@@ -421,15 +455,29 @@ def guardar(con, valores, autor):
     valores['_sap']: campos que el formulario completó con «Traer de SAP» (quedan marcados como de SAP)."""
     valores = dict(valores)
     sap_form = set(valores.pop("_sap", ()))
+    leido = valores.pop("_modificado", None)
     rid = valores.get("id")
     prev = con.execute("SELECT * FROM req WHERE id=?", (rid,)).fetchone() if rid else None
-    campos = [c for c, _, _ in CAMPOS if c != "id"] + ["notas"]
+    if prev is not None and leido is not None and prev["modificado"] != leido:
+        ult = con.execute("SELECT autor, fecha FROM req_eventos WHERE req_id=? ORDER BY fecha DESC, id DESC LIMIT 1",
+                          (rid,)).fetchone()
+        raise EdicionSimultanea(f"{ult['autor']} ({fmt(ult['fecha'][:10])} {ult['fecha'][11:16]})" if ult else "otro usuario")
+    campos = [c for c, _, _ in CAMPOS if c != "id"] + ["notas", "comprador"]
+    if "comprador" not in valores:
+        valores["comprador"] = prev["comprador"] if prev is not None else ""
     if prev is None:
-        rid = rid or siguiente_id(con)
         cols = ["id"] + campos + ["desde_sap", "creado", "modificado"]
-        con.execute(f"INSERT INTO req({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
-                    [rid] + [valores.get(c) for c in campos]
-                    + [json.dumps(sorted(sap_form & set(CAMPOS_SAP))), _ahora(), _ahora()])
+        for intento in range(5):
+            nuevo_id = rid or siguiente_id(con)
+            try:
+                con.execute(f"INSERT INTO req({','.join(cols)}) VALUES ({','.join('?' * len(cols))})",
+                            [nuevo_id] + [valores.get(c) for c in campos]
+                            + [json.dumps(sorted(sap_form & set(CAMPOS_SAP))), _ahora(), _ahora()])
+                break
+            except sqlite3.IntegrityError:
+                if rid or intento == 4:      # el otro comprador acaba de usar ese COD: se toma el siguiente
+                    raise
+        rid = nuevo_id
         evento(con, rid, "Requerimiento registrado.", autor, "cambio")
     else:
         desde = set(json.loads(prev["desde_sap"] or "[]"))
@@ -556,12 +604,13 @@ def indicadores(filas):
 # ---------------------------------------------------------------------------
 # Exportación a Excel
 # ---------------------------------------------------------------------------
-def exportar_excel(con, salida, plazos=None):
+def exportar_excel(con, salida, plazos=None, comprador=None):
     """Genera el Excel de seguimiento. Si `salida` está abierto en Excel, guarda una copia con la hora.
-    `plazos`: {id: 'Atrasado' | 'Atención' | 'En plazo'} del semáforo (columna PLAZO). Devuelve la ruta escrita."""
+    `plazos`: {id: 'Atrasado' | 'Atención' | 'En plazo'} del semáforo (columna PLAZO).
+    `comprador`: solo los requerimientos de ese comprador (None = todos). Devuelve la ruta escrita."""
     plazos = plazos or {}
     import xlsxwriter
-    filas = listar(con)
+    filas = [f for f in listar(con) if comprador is None or f["comprador"] == comprador]
     destino, salida = salida, os.path.join(os.path.dirname(salida), f"~tmp_req_{os.getpid()}.xlsx")
     # strings_to_formulas=False: un texto que empiece con «=» (nota, proveedor…) se guarda como texto
     wb = xlsxwriter.Workbook(salida, {"default_format_properties": {"font_name": "Arial", "font_size": 10},
@@ -575,14 +624,14 @@ def exportar_excel(con, salida, plazos=None):
 
     # --- CONTROL (mismas columnas que el Excel original + etapa y tiempos)
     ws = wb.add_worksheet("CONTROL")
-    extra = ["CONTROLLER", "CONTROLLER2", "JEFE DE PROYECTO", "ETAPA", "DÍAS EN ETAPA", "PLAZO", "ESTADO OC SAP",
+    extra = ["COMPRADOR", "CONTROLLER", "CONTROLLER2", "JEFE DE PROYECTO", "ETAPA", "DÍAS EN ETAPA", "PLAZO", "ESTADO OC SAP",
              "ÚLTIMO COMENTARIO OC", "DATOS DESDE SAP", "NOTAS"]
     tramos = [t[0] for t in TRAMOS]
     enc = [h for _, h, _ in CAMPOS] + extra + [f"DÍAS: {t}" for t in tramos]
     pos = {h: i for i, h in enumerate(enc)}
     grupos = [("DETALLE DE REQUERIMIENTO", "FECHA INICIO", "MONEDA"), ("FLUJO VALORIZACION", "ENVIO DE VALORIZACION", "FECHA DE APROBACION VALO"),
               ("FLUJO ORDEN", "EMISION DE ORDEN", "ORDEN"), ("FLUJO PAGO", "RECEPCION DE FACTURA", "FECHA DE PAGO"),
-              ("SEGUIMIENTO", "CONTROLLER", "NOTAS"), ("TIEMPOS (días)", enc[len(CAMPOS) + len(extra)], enc[-1])]
+              ("SEGUIMIENTO", "COMPRADOR", "NOTAS"), ("TIEMPOS (días)", enc[len(CAMPOS) + len(extra)], enc[-1])]
     for g, a, b in grupos:
         ws.merge_range(0, pos[a], 0, pos[b], g, grp)
     n = len(filas)
@@ -592,7 +641,7 @@ def exportar_excel(con, salida, plazos=None):
         for campo, _, tipo in CAMPOS:
             v = f[campo]
             fila.append(datetime.strptime(v, "%Y-%m-%d") if tipo == "fecha" and v else (v if v not in ("", None) else None))
-        fila += [f["controller"], f["controller2"], f["jefe"], f["etapa"], f["dias_etapa"], plazos.get(f["id"]) or None,
+        fila += [f["comprador"] or None, f["controller"], f["controller2"], f["jefe"], f["etapa"], f["dias_etapa"], plazos.get(f["id"]) or None,
                  f["sap_estado"] or None,
                  f["com_oc"] or None, ", ".join(ETIQUETAS[c] for c in f["desde_sap"]), f["notas"] or None]
         fila += [None] * len(tramos)
@@ -612,7 +661,7 @@ def exportar_excel(con, salida, plazos=None):
         ws.set_column(i, i, 12 if tipo == "fecha" else 10, fd if tipo == "fecha" else fm if tipo == "num" else None)
     ws.set_column(pos["PROVEEDOR"], pos["PROVEEDOR"], 34)
     ws.set_column(pos["REFERENCIA"], pos["REFERENCIA"], 14)
-    for h in ("CONTROLLER", "CONTROLLER2", "JEFE DE PROYECTO"):
+    for h in ("COMPRADOR", "CONTROLLER", "CONTROLLER2", "JEFE DE PROYECTO"):
         ws.set_column(pos[h], pos[h], 26)
     ws.set_column(pos["ETAPA"], pos["ETAPA"], 24)
     ws.set_column(pos["DATOS DESDE SAP"], pos["DATOS DESDE SAP"], 30)

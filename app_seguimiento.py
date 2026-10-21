@@ -6,18 +6,22 @@ Seguimiento de órdenes — aplicación de escritorio.
 - Pestaña "Facturas": facturas del último reporte (Pendiente de pago / Pagado) para revisar hasta su pago.
 - Los comentarios son por OC, se guardan en seguimiento.db (junto a la aplicación) y se arrastran a cada
   control nuevo; las facturas nuevas y los pagos detectados quedan registrados en el historial de la OC.
+- Varios compradores pueden usar la misma base (carpeta de red): cada uno tiene su configuración en
+  %APPDATA%\\Seguimiento Ordenes y las listas muestran por defecto lo suyo.
 """
 import json
 import os
 import queue
 import shutil
+import sqlite3
 import sys
+import unicodedata
 import threading
 import traceback
 from datetime import datetime, date
 
 import tkinter as tk
-from tkinter import ttk, filedialog, messagebox, simpledialog
+from tkinter import ttk, filedialog, messagebox
 
 import procesar_sap as ps
 import seguimiento as sgm
@@ -27,8 +31,10 @@ import app_requerimientos as ui_req
 
 BASE = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
 DB = os.path.join(BASE, "seguimiento.db")
-CFG = os.path.join(BASE, "config_seguimiento.json")
+CFG_ANTIGUA = os.path.join(BASE, "config_seguimiento.json")        # antes: una sola configuración junto a la app
+CFG = os.path.join(os.environ.get("APPDATA") or BASE, "Seguimiento Ordenes", "config.json")    # una por usuario
 CARGAS = os.path.join(BASE, "Cargas")
+DIAS_RESPALDO = 15
 
 SITUACIONES = ["Activas", sgm.SIT_SIN_FACT, sgm.SIT_FACTURADA, sgm.SIT_CERRADA_SAP, sgm.SIT_CANCELADA_SAP,
                sgm.SIT_FUERA, "Todas"]
@@ -52,17 +58,73 @@ def fmt_fecha(iso):
     return f"{iso[8:10]}/{iso[5:7]}/{iso[:4]}" if iso else ""
 
 
+def usuario_windows():
+    try:
+        return os.getlogin()
+    except OSError:
+        return os.environ.get("USERNAME", "")
+
+
 def leer_cfg():
     try:
         with open(CFG, encoding="utf-8-sig") as fh:
             return json.load(fh)
     except (OSError, ValueError):
+        pass
+    # Primera vez de este usuario: se toma la configuración antigua si era suya (los plazos, en cualquier caso)
+    try:
+        with open(CFG_ANTIGUA, encoding="utf-8-sig") as fh:
+            vieja = json.load(fh)
+    except (OSError, ValueError):
         return {}
+    if str(vieja.get("autor", "")).lower() == usuario_windows().lower():
+        return vieja
+    return {k: v for k, v in vieja.items() if k == "plazos"}
 
 
 def guardar_cfg(cfg):
+    os.makedirs(os.path.dirname(CFG), exist_ok=True)
     with open(CFG, "w", encoding="utf-8") as fh:
         json.dump(cfg, fh, ensure_ascii=False, indent=2)
+
+
+def _sin_tildes(t):
+    return "".join(c for c in unicodedata.normalize("NFD", t) if unicodedata.category(c) != "Mn").lower()
+
+
+def adivinar_comprador(login, nombres):
+    """'asalinas' -> 'Alejandro Salinas' (inicial del nombre + apellido), si está entre los compradores."""
+    login = _sin_tildes(login)
+    for n in nombres:
+        partes = _sin_tildes(n).split()
+        if len(partes) >= 2 and login in {partes[0][0] + p for p in partes[1:]} | {partes[0]}:
+            return n
+    return ""
+
+
+def respaldo_diario(con):
+    """Copia de la base una vez al día en Respaldos\\Automáticos (se guardan los últimos DIAS_RESPALDO)."""
+    carpeta = os.path.join(BASE, "Respaldos", "Automáticos")
+    destino = os.path.join(carpeta, f"seguimiento_{date.today():%Y-%m-%d}.db")
+    if os.path.exists(destino):
+        return
+    os.makedirs(carpeta, exist_ok=True)
+    tmp = destino + f".{os.getpid()}.tmp"
+    copia = sqlite3.connect(tmp)
+    try:
+        con.backup(copia)
+    finally:
+        copia.close()
+    try:
+        os.replace(tmp, destino)
+    except OSError:              # el otro usuario lo hizo al mismo tiempo
+        os.remove(tmp)
+    viejos = sorted(f for f in os.listdir(carpeta) if f.startswith("seguimiento_") and f.endswith(".db"))
+    for f in viejos[:-DIAS_RESPALDO]:
+        try:
+            os.remove(os.path.join(carpeta, f))
+        except OSError:
+            pass
 
 
 def registrar_error(texto):
@@ -138,6 +200,10 @@ def aplicar_carga(ruta, df, log, meta, fr):
     con = sgm.conectar(DB)
     salida = None
     try:
+        try:
+            respaldo_diario(con)
+        except Exception:  # noqa: BLE001 — sin respaldo igual se carga; queda registrado
+            registrar_error("Respaldo diario:\n" + traceback.format_exc())
         res = sgm.sincronizar(con, df, fr, archivo)
         if not res["omitida"]:
             rq.preparar(con)
@@ -193,6 +259,7 @@ class App(tk.Tk):
         self._com_oc = None                   # OC a la que pertenece el texto del cuadro «Nuevo comentario»
         self.sash = None                      # altura del panel de detalle al ocultarlo
         self.ultima_carga_id = None
+        self.data_version = None             # cambia cuando otro usuario guarda en la base
         self._ui()
         self.bind_all("<F5>", lambda e: self.actualizar_vista())
         self.bind("<Activate>", lambda e: self.after_idle(self._revisar_cambios_externos))
@@ -200,7 +267,12 @@ class App(tk.Tk):
         self.refrescar()
 
     def _inicio(self):
-        self._pedir_autor()
+        self._pedir_usuario()
+        self._filtros_mios()
+        try:
+            respaldo_diario(self.con)
+        except Exception:  # noqa: BLE001
+            registrar_error("Respaldo diario:\n" + traceback.format_exc())
         if self.cfg.get("pendientes_al_abrir", True):
             self.pendientes_de_hoy(auto=True)
 
@@ -219,9 +291,8 @@ class App(tk.Tk):
         self.refrescar()
 
     def _revisar_cambios_externos(self):
-        """Si una carga programada (--cargar) actualizó la base mientras la app estaba abierta, se refresca."""
-        u = sgm.ultima_carga(self.con)
-        if u is not None and u["id"] != self.ultima_carga_id:
+        """Al volver a la ventana: si otro usuario o una carga programada (--cargar) cambió la base, se refresca."""
+        if self.con.execute("PRAGMA data_version").fetchone()[0] != self.data_version:
             self.actualizar_vista()
 
     # ------------------------------------------------------------------ UI
@@ -236,7 +307,7 @@ class App(tk.Tk):
                    command=self.pendientes_de_hoy).pack(side="left", padx=(12, 0))
         ttk.Button(barra, text="⚙  Plazos…", command=self.editar_plazos).pack(side="left", padx=6)
         self.lbl_autor = ttk.Label(barra, text="")
-        ttk.Button(barra, text="Cambiar", command=lambda: self._pedir_autor(True)).pack(side="right")
+        ttk.Button(barra, text="Cambiar", command=lambda: (self._pedir_usuario(True), self._filtros_mios())).pack(side="right")
         self.lbl_autor.pack(side="right", padx=6)
 
         self.lbl_estado = ttk.Label(self, padding=(10, 0), foreground="#1F3864")
@@ -396,27 +467,73 @@ class App(tk.Tk):
         v.widget = cb
         return v
 
-    def _pedir_autor(self, forzar=False):
-        if forzar or not self.cfg.get("autor"):
-            try:
-                defecto = self.cfg.get("autor") or os.getlogin()
-            except OSError:
-                defecto = ""
-            nombre = simpledialog.askstring("Tu nombre", "Nombre con el que se firmarán tus comentarios:",
-                                            initialvalue=defecto, parent=self)
-            if nombre and nombre.strip():
-                self.cfg["autor"] = nombre.strip()
+    def _pedir_usuario(self, forzar=False):
+        """Quién usa la app en este Windows: su comprador (las listas muestran lo suyo) y la firma de comentarios."""
+        if forzar or not self.cfg.get("autor") or "comprador" not in self.cfg:
+            login = usuario_windows()
+            nombres = rq.compradores(self.con)
+            win = tk.Toplevel(self)
+            win.title("¿Quién usa la aplicación?")
+            win.transient(self)
+            win.resizable(False, False)
+            c = ttk.Frame(win, padding=16)
+            c.pack(fill="both", expand=True)
+            ttk.Label(c, text="Comprador:").grid(row=0, column=0, sticky="w")
+            v_comp = tk.StringVar(value=self.cfg.get("comprador") or adivinar_comprador(login, nombres))
+            cb = ttk.Combobox(c, textvariable=v_comp, values=nombres, width=32)
+            cb.grid(row=0, column=1, sticky="w", pady=3)
+            ttk.Label(c, text="Tu nombre tal como aparece en la columna «Usuario» del reporte SAP. Las listas muestran "
+                              "por defecto tus requerimientos, OC y facturas (con «Todos» ves también los del otro "
+                              "comprador).", foreground="#595959", wraplength=420, justify="left").grid(
+                row=1, column=0, columnspan=2, sticky="w", pady=(0, 10))
+            ttk.Label(c, text="Firma de comentarios:").grid(row=2, column=0, sticky="w")
+            v_autor = tk.StringVar(value=self.cfg.get("autor") or login)
+            ttk.Entry(c, textvariable=v_autor, width=34).grid(row=2, column=1, sticky="w", pady=3)
+
+            def aceptar(e=None):
+                self.cfg["comprador"] = " ".join(v_comp.get().split())
+                self.cfg["autor"] = v_autor.get().strip() or self.cfg.get("autor") or login
                 guardar_cfg(self.cfg)
-            elif not self.cfg.get("autor") and defecto:
-                self.cfg["autor"] = defecto           # si se cancela, se firma con el usuario de Windows
-                guardar_cfg(self.cfg)
-        self.lbl_autor.config(text=f"Comentarios como: {self.cfg.get('autor', '(sin nombre)')}")
+                win.destroy()
+
+            def cancelar():
+                if not self.cfg.get("autor") or "comprador" not in self.cfg:
+                    aceptar()                   # primera vez: se queda con lo propuesto (se puede cambiar luego)
+                else:
+                    win.destroy()
+            pie = ttk.Frame(win, padding=(16, 0, 16, 12))
+            pie.pack(fill="x")
+            ttk.Button(pie, text="Aceptar", style="Accent.TButton", command=aceptar).pack(side="right")
+            ttk.Button(pie, text="Cancelar", command=cancelar).pack(side="right", padx=6)
+            win.protocol("WM_DELETE_WINDOW", cancelar)
+            win.bind("<Return>", aceptar)
+            win.bind("<Escape>", lambda e: cancelar())
+            win.update_idletasks()
+            win.geometry(f"+{self.winfo_rootx() + 200}+{self.winfo_rooty() + 120}")
+            cb.focus_set()
+            win.grab_set()
+            self.wait_window(win)
+        comp = self.cfg.get("comprador") or "(todos)"
+        self.lbl_autor.config(text=f"Usuario: {comp} · firma: {self.cfg.get('autor', '(sin nombre)')}")
+
+    def mio(self):
+        """Valor del filtro «Comprador» por defecto: el comprador de este usuario (o Todos)."""
+        return self.cfg.get("comprador") or "Todos"
+
+    def _filtros_mios(self):
+        for v in (self.v_comprador, self.vf_comprador, self.vr_comprador, self.vi_comprador):
+            v.set(self.mio())
+        self.pintar()
+        self.pintar_fac()
+        ui_req.pintar_req(self)
+        ui_req.pintar_ind(self)
 
     # ------------------------------------------------------------- datos
     def refrescar(self):
         self.filas = sgm.listar(self.con)
         compradores = sorted({f["usuario"] for f in self.filas if f["usuario"]})
         self.v_comprador.widget.config(values=["Todos"] + compradores)
+        self.data_version = self.con.execute("PRAGMA data_version").fetchone()[0]
         u = sgm.ultima_carga(self.con)
         self.ultima_carga_id = u["id"] if u else None
         if u:
@@ -527,8 +644,8 @@ class App(tk.Tk):
     def limpiar_filtros_fac(self):
         self.vf_buscar.set("")
         self.vf_estado.set("Pendiente de pago")
-        for v in (self.vf_comprador, self.vf_estado_oc):
-            v.set("Todos")
+        self.vf_comprador.set(self.mio())
+        self.vf_estado_oc.set("Todos")
         self.vf_mon.set("Todas")
         self.vf_semaforo.set("Todas")
         for v in (self.vf_concom, self.vf_fuera):
@@ -653,8 +770,9 @@ class App(tk.Tk):
 
     def limpiar_filtros(self):
         self.v_buscar.set("")
-        for v in (self.v_comprador, self.v_seg, self.v_semaforo):
+        for v in (self.v_seg, self.v_semaforo):
             v.set("Todos")
+        self.v_comprador.set(self.mio())
         self.v_estado_oc.set("Todos")
         self.v_situacion.set("Activas")
         self.v_sincom.set(False)
@@ -822,14 +940,15 @@ class App(tk.Tk):
             niveles = [fn(f) for f in filas]
             return niveles.count(sem.ROJO), niveles.count(sem.AMARILLO)
 
-        abiertos = [f for f in self.filas_req if f["etapa"] not in rq.CERRADAS]
+        yo = self.cfg.get("comprador")              # solo lo de este comprador (si no se indicó, todo)
+        abiertos = [f for f in self.filas_req if f["etapa"] not in rq.CERRADAS and (not yo or f["comprador"] == yo)]
         hasta = [f for f in abiertos if f["etapa"] in rq.ETAPAS_HASTA_OC]
         despues = [f for f in abiertos if f["etapa"] not in rq.ETAPAS_HASTA_OC]
-        activas = [f for f in self.filas if f["situacion"] == sgm.SIT_ACTIVA]
+        activas = [f for f in self.filas if f["situacion"] == sgm.SIT_ACTIVA and (not yo or f["usuario"] == yo)]
         r1, a1 = cuenta(hasta, lambda f: sem.nivel_req(f, u))
         r2, a2 = cuenta(despues, lambda f: sem.nivel_req(f, u))
         r3, a3 = cuenta(activas, lambda f: sem.nivel_oc(f, u))
-        r4, a4 = cuenta(self.facturas, lambda f: sem.nivel_factura(f, u))
+        r4, a4 = cuenta([f for f in self.facturas if not yo or f["usuario"] == yo], lambda f: sem.nivel_factura(f, u))
         comp_venc = sum(1 for f in activas if f["fecha_compromiso"] and f["fecha_compromiso"] < hoy.isoformat())
         comp_hoy = sum(1 for f in activas if f["fecha_compromiso"] == hoy.isoformat())
         if auto and not any((r1, a1, r2, a2, r3, a3, r4, a4, comp_hoy)):
@@ -841,7 +960,8 @@ class App(tk.Tk):
         win.resizable(False, False)
         cuerpo = ttk.Frame(win, padding=16)
         cuerpo.pack(fill="both", expand=True)
-        ttk.Label(cuerpo, text=f"🚦 Pendientes de hoy · {hoy:%d/%m/%Y}", style="Titulo.TLabel").grid(
+        ttk.Label(cuerpo, text=f"🚦 Pendientes de hoy · {hoy:%d/%m/%Y}" + (f" · {yo}" if yo else ""),
+                  style="Titulo.TLabel").grid(
             row=0, column=0, columnspan=4, sticky="w", pady=(0, 10))
 
         def chip(parent, texto_chip, nivel, fila, col):
@@ -895,6 +1015,7 @@ class App(tk.Tk):
             self.nb.select(0)
             for v in (self.vr_tipo, self.vr_controller, self.vr_mes):
                 v.set("Todos")
+            self.vr_comprador.set(self.mio())
             self.vr_buscar.set("")
             self.vr_etapa.set("Pendientes hasta envío de OC" if destino == "req_hasta" else "Abiertos (todos)")
             self.vr_semaforo.set("Atrasado + Atención")
@@ -1096,9 +1217,10 @@ class App(tk.Tk):
         self._en_segundo_plano("Actualizando el control con los comentarios", trabajo, fin)
 
     def abrir_control(self):
-        ruta = self.cfg.get("ultimo_control")
-        if ruta and os.path.exists(ruta):
-            os.startfile(ruta)
+        u = sgm.ultima_carga(self.con)
+        rutas = [r for r in (self.cfg.get("ultimo_control"), u["salida"] if u else None) if r and os.path.exists(r)]
+        if rutas:
+            os.startfile(max(rutas, key=os.path.getmtime))   # la carga pudo hacerla el otro comprador
         else:
             messagebox.showinfo("Sin control", "Aún no se ha generado un control desde la aplicación.", parent=self)
 

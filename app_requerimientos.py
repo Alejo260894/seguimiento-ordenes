@@ -17,7 +17,7 @@ COLS_REQ = [("id", "COD", 50, "e"), ("f_solic", "F. Solic.", 80, "center"), ("pr
             ("etapa", "Etapa", 165, "w"), ("dias_etapa", "Días etapa", 70, "e"), ("plazo", "Plazo", 75, "center"),
             ("monto", "Monto", 90, "e"),
             ("moneda", "Mon", 45, "center"), ("orden", "Orden", 85, "e"), ("sap_estado", "Estado OC SAP", 95, "w"),
-            ("controller", "Controller", 180, "w"), ("estatus", "Estatus", 120, "w"),
+            ("controller", "Controller", 180, "w"), ("comprador", "Comprador", 120, "w"), ("estatus", "Estatus", 120, "w"),
             ("com_oc", "Último comentario OC", 260, "w")]
 FILTRO_ETAPA = ["Pendientes hasta envío de OC", "Abiertos (todos)"] + rq.NOMBRES_ETAPA + rq.CERRADAS[1:] + ["Cerrados", "Todos"]
 
@@ -122,7 +122,10 @@ class EditorReq(tk.Toplevel):
         self.app, self.con = app, app.con
         self.req = req or {}
         nuevo = not req
-        self.title("Nuevo requerimiento" if nuevo else f"Requerimiento {req['id']:03d}")
+        titulo = "Nuevo requerimiento" if nuevo else f"Requerimiento {req['id']:03d}"
+        if req and req.get("cod_excel") and req["cod_excel"] != req["id"]:
+            titulo += f"  ·  COD {req['cod_excel']:03d} en el Excel de {req.get('comprador') or 'origen'}"
+        self.title(titulo)
         # Tamaño ajustado a la pantalla (en portátiles o con zoom de Windows los botones deben verse)
         ancho, alto = min(1180, self.winfo_screenwidth() - 40), min(800, self.winfo_screenheight() - 90)
         self.geometry(f"{ancho}x{alto}+{max(0, (self.winfo_screenwidth() - ancho) // 2)}+10")
@@ -173,6 +176,7 @@ class EditorReq(tk.Toplevel):
         self._combo(det, 2, 4, "estatus", "Estatus:", self._valores("estatus", list(rq.ESTATUS_CIERRE)), editable=True)
         self._fecha(det, 3, 0, "fecha_inicio", "Fecha inicio:")
         self._fecha(det, 3, 2, "fecha_fin", "Fecha fin:")
+        self._combo(det, 3, 4, "comprador", "Comprador:", rq.compradores(self.con), editable=True)
         self.w_vinc = {"monto": self._campo(det, 4, 0, "monto", "Monto:", ancho=14),
                        "moneda": self._combo(det, 4, 2, "moneda", "Moneda:", rq.MONEDAS)}
         self.lbl_vinc = ttk.Label(det, text="", foreground="#2F5597", wraplength=520, justify="left")
@@ -279,6 +283,7 @@ class EditorReq(tk.Toplevel):
                 self.v[campo].set("" if val is None else f"{val:,.2f}")
             else:
                 self.v[campo].set("" if val is None else str(val))
+        self.v["comprador"].set(r.get("comprador") or ("" if r else self.app.cfg.get("comprador", "")))
         if not r:
             self.v["f_solic"].set(date.today().strftime("%d/%m/%Y"))
         self.txt_notas.insert("1.0", r.get("notas") or "")
@@ -291,6 +296,10 @@ class EditorReq(tk.Toplevel):
             self.txt_hist.insert("end", e["texto"] + "\n\n", "sis" if e["tipo"] == "sistema" else "")
         self.txt_hist.config(state="disabled")
         self.txt_hist.see("end")
+        try:
+            self._inicial = self._leer()          # para saber qué cambió el usuario si otro guarda a la vez
+        except ValueError:
+            self._inicial = {}
         if r:
             marcados = ", ".join(rq.ETIQUETAS[c] for c in r.get("desde_sap", []))
             self.lbl_etapa.config(text=f"Etapa: {r['etapa']}" + (f"   ·   Datos desde SAP: {marcados}" if marcados else ""))
@@ -378,27 +387,34 @@ class EditorReq(tk.Toplevel):
         messagebox.showinfo("SAP", ("Completado (solo campos vacíos): " + ", ".join(llenados)) if llenados
                             else "No había campos vacíos que completar con SAP.", parent=self)
 
-    def guardar(self):
+    def _leer(self):
+        """Valores del formulario (ValueError si alguno no es válido; el campo queda en self._campo_error)."""
         vals = {"id": self.req.get("id")}
-        try:
-            for campo, _, tipo in rq.CAMPOS:
-                if campo == "id":
-                    continue
-                s = self.v[campo].get().strip()
-                if tipo == "fecha":
-                    vals[campo] = iso_desde_ddmm(s)
-                elif campo == "monto":
-                    vals[campo] = leer_monto(s)
-                elif tipo == "int":
-                    vals[campo] = int(s) if s else None
-                else:
-                    vals[campo] = s.upper() if campo in ("estatus", "tipo", "proyecto") else s
-        except ValueError:
-            messagebox.showwarning("Dato inválido", f"Revisa «{rq.ETIQUETAS[campo]}»: las fechas van como dd/mm/aaaa, "
-                                                    f"el monto como número (1234.50 o 1.234,50) y la orden solo con "
-                                                    f"dígitos.", parent=self)
-            return
+        for campo, _, tipo in rq.CAMPOS:
+            if campo == "id":
+                continue
+            self._campo_error = campo
+            s = self.v[campo].get().strip()
+            if tipo == "fecha":
+                vals[campo] = iso_desde_ddmm(s)
+            elif campo == "monto":
+                vals[campo] = leer_monto(s)
+            elif tipo == "int":
+                vals[campo] = int(s) if s else None
+            else:
+                vals[campo] = s.upper() if campo in ("estatus", "tipo", "proyecto") else s
         vals["notas"] = self.txt_notas.get("1.0", "end").strip()
+        vals["comprador"] = " ".join(self.v["comprador"].get().split())
+        return vals
+
+    def guardar(self):
+        try:
+            vals = self._leer()
+        except ValueError:
+            messagebox.showwarning("Dato inválido", f"Revisa «{rq.ETIQUETAS[self._campo_error]}»: las fechas van como "
+                                                    f"dd/mm/aaaa, el monto como número (1234.50 o 1.234,50) y la orden "
+                                                    f"solo con dígitos.", parent=self)
+            return
         if not vals["proyecto"] and not vals["referencia"]:
             messagebox.showwarning("Faltan datos", "Indica al menos el proyecto o la referencia.", parent=self)
             return
@@ -408,7 +424,23 @@ class EditorReq(tk.Toplevel):
             return
         # Lo que el formulario tomó de SAP (y no se modificó a mano) queda marcado como dato de SAP
         vals["_sap"] = [c for c, v in self._sap_form.items() if self.v[c].get().strip() == str(v).strip()]
-        rid = rq.guardar(self.con, vals, self.app.cfg.get("autor", ""))
+        vals["_modificado"] = self.req.get("modificado")
+        try:
+            rid = rq.guardar(self.con, vals, self.app.cfg.get("autor", ""))
+        except rq.EdicionSimultanea as e:
+            self.con.rollback()
+            if not messagebox.askyesno(
+                    "Modificado mientras lo editabas",
+                    f"Este requerimiento fue modificado por {e} mientras lo tenías abierto (el detalle está en el "
+                    f"historial).\n\nSi continúas, se guardan solo los campos que tú cambiaste; el resto queda como "
+                    f"lo dejó la otra persona.\n\n¿Guardar tus cambios?", icon="warning", parent=self):
+                return
+            actual = self.con.execute("SELECT * FROM req WHERE id=?", (vals["id"],)).fetchone()
+            for k in list(vals):
+                if k in self._inicial and k != "id" and vals[k] == self._inicial[k]:
+                    vals[k] = actual[k]           # no lo tocaste: se respeta lo que guardó el otro
+            vals.pop("_modificado")
+            rid = rq.guardar(self.con, vals, self.app.cfg.get("autor", ""))
         self.app.refrescar_req()
         self.app.tree_req.selection_set(str(rid)) if self.app.tree_req.exists(str(rid)) else None
         self.destroy()
@@ -426,7 +458,8 @@ def construir(app, tab_req, tab_ind):
     ttk.Button(barra, text="✏  Editar", command=lambda: editar(app)).pack(side="left", padx=6)
     ttk.Button(barra, text="📤  Exportar Excel", command=lambda: exportar(app)).pack(side="left")
     ttk.Button(barra, text="📚  Actualizar catálogos", command=lambda: catalogos(app)).pack(side="left", padx=6)
-    ttk.Button(barra, text="📥  Importar desde Excel…", command=lambda: importar(app)).pack(side="left")
+    ttk.Button(barra, text="📥  Importar desde Excel…", command=lambda: importar(app)).pack(side="left", padx=(0, 18))
+    app.vr_comprador = app._combo(barra, "Comprador:", ["Todos"], 20, lambda: pintar_req(app))
     app.lbl_cat = ttk.Label(barra, text="", foreground="#808080")
     app.lbl_cat.pack(side="right")
 
@@ -454,6 +487,7 @@ def construir(app, tab_req, tab_ind):
     # ---- Indicadores
     fi = ttk.Frame(tab_ind, padding=(4, 6))
     fi.pack(fill="x")
+    app.vi_comprador = app._combo(fi, "Comprador:", ["Todos"], 20, lambda: pintar_ind(app))
     app.vi_tipo = app._combo(fi, "Tipo:", ["Todos"] + rq.TIPOS, 8, lambda: pintar_ind(app))
     app.vi_desde = app._combo(fi, "Solicitudes desde:", ["Todos"], 9, lambda: pintar_ind(app))
     app.vi_hasta = app._combo(fi, "hasta:", ["Todos"], 9, lambda: pintar_ind(app))
@@ -489,6 +523,8 @@ def refrescar(app):
     for v in (app.vr_controller, app.vi_controller):
         v.widget.config(values=ctrl)
     app.vr_mes.widget.config(values=["Todos"] + meses[::-1])
+    for v in (app.vr_comprador, app.vi_comprador):
+        v.widget.config(values=["Todos"] + rq.compradores(app.con))
     for v in (app.vi_desde, app.vi_hasta):
         v.widget.config(values=["Todos"] + meses)
     n_p, n_v = app.con.execute("SELECT (SELECT COUNT(*) FROM cat_proyectos), (SELECT COUNT(*) FROM cat_proveedores)").fetchone()
@@ -500,6 +536,7 @@ def refrescar(app):
 def filtradas_req(app):
     q = app.vr_buscar.get().strip().lower()
     et, tp, ct, mes = app.vr_etapa.get(), app.vr_tipo.get(), app.vr_controller.get(), app.vr_mes.get()
+    comp = app.vr_comprador.get()
     u, plazo = sem.umbrales(app.cfg), app.vr_semaforo.get()
     out = []
     for f in app.filas_req:
@@ -516,12 +553,15 @@ def filtradas_req(app):
             continue
         if tp != "Todos" and f["tipo"] != tp:
             continue
+        if comp != "Todos" and f["comprador"] != comp:
+            continue
         if ct != "Todos" and f["controller"] != ct:
             continue
         if mes != "Todos" and not (f["f_solic"] or "").startswith(mes):
             continue
         if q and q not in " ".join(str(f.get(k) or "") for k in (
-                "id", "proyecto", "proyecto_nombre", "referencia", "proveedor", "orden", "num_factura", "notas", "controller")).lower():
+                "id", "cod_excel", "proyecto", "proyecto_nombre", "referencia", "proveedor", "orden", "num_factura", "notas",
+                "controller", "comprador")).lower():
             continue
         out.append(f)
     return out
@@ -549,15 +589,18 @@ def pintar_req(app):
             f"{f['id']:03d}", rq.fmt(f["f_solic"]), f["proyecto"], f["referencia"], f["tipo"], f["proveedor"], f["etapa"],
             "" if f["dias_etapa"] is None else f["dias_etapa"], sem.texto(f["nivel"]),
             "" if f["monto"] is None else f"{f['monto']:,.2f}",
-            f["moneda"], f["orden"] or "", f["sap_estado"], f["controller"], f["estatus"], f["com_oc"].replace("\n", " ")))
+            f["moneda"], f["orden"] or "", f["sap_estado"], f["controller"], f["comprador"], f["estatus"],
+            f["com_oc"].replace("\n", " ")))
     if sel and t.exists(sel[0]):
         t.selection_set(sel[0])
     u = sem.umbrales(app.cfg)
-    abiertos = [f for f in app.filas_req if f["etapa"] not in rq.CERRADAS]
+    comp = app.vr_comprador.get()
+    abiertos = [f for f in app.filas_req if f["etapa"] not in rq.CERRADAS and comp in ("Todos", f["comprador"])]
     hasta = [f for f in abiertos if f["etapa"] in rq.ETAPAS_HASTA_OC]
     rojos = sum(1 for f in hasta if sem.nivel_req(f, u) == sem.ROJO)
     amar = sum(1 for f in hasta if sem.nivel_req(f, u) == sem.AMARILLO)
-    app.lbl_resumen_req.config(text=f"Mostrando {len(filas)}   |   Abiertos: {len(abiertos)}   |   Hasta envío de OC: "
+    de = "" if comp == "Todos" else f" de {comp}"
+    app.lbl_resumen_req.config(text=f"Mostrando {len(filas)}   |   Abiertos{de}: {len(abiertos)}   |   Hasta envío de OC: "
                                     f"{len(hasta)} (atrasados {rojos}, en atención {amar})   ·   colores: rojo = atrasado, "
                                     f"amarillo = atención (umbrales en «⚙ Plazos…»)")
 
@@ -569,8 +612,10 @@ def ordenar_req(app, clave):
 
 def pintar_ind(app):
     tp, d, h, ct = app.vi_tipo.get(), app.vi_desde.get(), app.vi_hasta.get(), app.vi_controller.get()
+    comp = app.vi_comprador.get()
     filas = [f for f in app.filas_req
              if (tp == "Todos" or f["tipo"] == tp) and (ct == "Todos" or f["controller"] == ct)
+             and (comp == "Todos" or f["comprador"] == comp)
              and (d == "Todos" or (f["f_solic"] or "")[:7] >= d) and (h == "Todos" or (f["f_solic"] or "9999")[:7] <= h)]
     pend, tiempos = rq.indicadores(filas)
     u = sem.umbrales(app.cfg)
@@ -649,12 +694,20 @@ def catalogos(app):
 
 
 def importar(app):
+    comprador = app.cfg.get("comprador")
+    if not comprador:
+        messagebox.showinfo("Importar", "Primero indica quién eres (botón «Cambiar» arriba a la derecha): los "
+                                        "requerimientos se importan a nombre de ese comprador.", parent=app)
+        return
     ruta = _ruta_excel_req(app, preguntar=True)
     if not ruta:
         return
+    if not messagebox.askyesno("Importar", f"Los requerimientos de la tabla CONTROL de\n{os.path.basename(ruta)}\n"
+                                           f"se importarán como requerimientos de {comprador}.\n\n¿Continuar?", parent=app):
+        return
     try:
         rq.actualizar_catalogos(app.con, ruta)
-        n, avisos = rq.importar_control(app.con, ruta, app.cfg.get("autor", "Importación"))
+        n, avisos, renumerados = rq.importar_control(app.con, ruta, app.cfg.get("autor", "Importación"), comprador)
         c = rq.completar_desde_sap(app.con)
     except Exception as e:  # noqa: BLE001
         app.con.rollback()
@@ -662,8 +715,11 @@ def importar(app):
         return
     _recordar_ruta(app, ruta)
     refrescar(app)
-    texto = (f"Se importaron {n} requerimientos nuevos de la tabla CONTROL (los COD que ya existían no se tocan).\n"
-             f"{c} se completaron con datos de SAP.")
+    texto = (f"Se importaron {n} requerimientos nuevos de {comprador} (los COD que ya estaban importados no se "
+             f"tocan).\n{c} se completaron con datos de SAP.")
+    if renumerados:
+        texto += ("\n\nComo esos COD ya los usaban otros requerimientos de la base, se numeraron a continuación. "
+                  "El COD original del Excel se ve en el título del formulario y también sirve para buscar.")
     if avisos:
         texto += f"\n\n{len(avisos)} fechas no se pudieron leer y quedaron vacías:\n• " + "\n• ".join(avisos[:10])
         texto += "\n…" if len(avisos) > 10 else ""
@@ -671,9 +727,12 @@ def importar(app):
 
 
 def exportar(app):
+    """Exporta los requerimientos del comprador elegido en la pestaña Requerimientos (o todos)."""
     u = sem.umbrales(app.cfg)
     plazos = {f["id"]: sem.texto(sem.nivel_req(f, u)) for f in app.filas_req}
-    salida = rq.exportar_excel(app.con, os.path.join(app_base(app), f"Seguimiento requerimientos {date.today():%d_%m}.xlsx"),
-                               plazos)
+    comp = app.vr_comprador.get()
+    comp = None if comp == "Todos" else comp
+    nombre = f"Seguimiento requerimientos{' ' + comp if comp else ''} {date.today():%d_%m}.xlsx"
+    salida = rq.exportar_excel(app.con, os.path.join(app_base(app), nombre), plazos, comp)
     if messagebox.askyesno("Exportar", f"Se generó {os.path.basename(salida)}.\n\n¿Abrirlo en Excel?", parent=app):
         os.startfile(salida)

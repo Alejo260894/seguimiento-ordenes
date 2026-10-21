@@ -62,7 +62,9 @@ CREATE TABLE IF NOT EXISTS cargas (
 
 
 def conectar(path):
-    con = sqlite3.connect(path)
+    # Base compartida en red: si el otro usuario está guardando (o cargando un reporte), se espera hasta 60 s.
+    # El diario queda en modo DELETE (el modo WAL no funciona en carpetas de red).
+    con = sqlite3.connect(path, timeout=60)
     con.row_factory = sqlite3.Row
     con.executescript(SCHEMA)
     if con.execute("PRAGMA user_version").fetchone()[0] < 1:

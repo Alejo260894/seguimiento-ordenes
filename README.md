@@ -27,7 +27,9 @@ Reemplaza el llenado manual del Excel «SEGUIMIENTO DE REQUERIMIENTOS Y ORDENES�
   - **CONTROL**: tus mismas columnas, más etapa, días, estado de la OC en SAP y último comentario de la OC;
   - **PENDIENTES**;
   - **TIEMPOS**: con fórmulas sobre la tabla.
-- **📚 Actualizar catálogos** relee Consulta1 y PROVEEDORES del Excel de seguimiento (ruta guardada en la configuración). **📥 Importar desde Excel…** agrega solo los COD que todavía no existen.
+- **📚 Actualizar catálogos** relee Consulta1 y PROVEEDORES del Excel de seguimiento (ruta guardada en la configuración). Los proyectos se reemplazan por la lista de Consulta1; los proveedores se suman a los que ya había.
+- **📥 Importar desde Excel…** agrega, a nombre de tu comprador, los COD de la tabla CONTROL que todavía no importaste.
+- Cada requerimiento tiene un **Comprador**. El filtro **Comprador** (arriba, junto a los botones, y en Indicadores) muestra por defecto los tuyos. **📤 Exportar Excel** exporta los del comprador elegido, con su nombre en el archivo.
 
 ## Aplicación «Seguimiento Ordenes.exe» (uso diario)
 Para abrirla, haz doble clic en el `.exe`. No necesita Python. Tarda unos segundos en arrancar.
@@ -83,16 +85,25 @@ Si eliges el estado **"Cerrar sin factura"**, la OC deja de estar activa. Úsalo
 - En **Indicadores** y en el Excel exportado (columna PLAZO y hoja PENDIENTES) aparecen los atrasados y en atención por etapa.
 - En «OC sin factura», las OC sin comentarios ahora se ven en **negrita**: el fondo de color queda para el semáforo.
 
-**F5** actualiza la vista. Si una carga programada actualizó la base mientras la app estaba abierta, la vista se refresca sola al volver a la ventana.
+**F5** actualiza la vista. Si el otro comprador o una carga programada cambió la base mientras la app estaba abierta, la vista se refresca sola al volver a la ventana.
+
+### Dos compradores en la misma base
+- La carpeta de la aplicación debe estar en una **carpeta de red** (servidor), con el `.exe`, `seguimiento.db`, `Cargas\` y `Respaldos\`. Cada comprador abre el mismo `.exe` (conviene un acceso directo en el escritorio).
+- **No uses OneDrive ni SharePoint para la base compartida.** Cada equipo sincroniza su propia copia y, si los dos guardan, OneDrive crea copias en conflicto y se pierden cambios.
+- La primera vez, la app pregunta **¿Quién usa la aplicación?**: el comprador (tal como aparece en la columna «Usuario» de SAP) y la firma de los comentarios. Se cambia con **Cambiar**, arriba a la derecha.
+- Requerimientos, OC sin factura, Facturas, Indicadores y **Pendientes de hoy** muestran por defecto **lo tuyo**. Con **Comprador: Todos** ves también lo del otro.
+- Los comentarios de una OC son compartidos: los dos ven el mismo historial, con la firma de cada uno.
+- Si el otro guarda mientras tú haces lo mismo, la app espera unos segundos y luego guarda. Si los dos editan el **mismo requerimiento**, la app avisa al guardar y conserva solo los campos que tú cambiaste; el resto queda como lo dejó el otro.
+- El reporte SAP lo puede cargar cualquiera de los dos; trae las OC de ambos. Si el otro ya cargó el mismo reporte, la segunda carga no cambia nada.
+- **Importar el Excel de otro comprador**: entra con su usuario y usa **📥 Importar desde Excel…**. Sus COD se numeran a continuación de los existentes. El COD original se ve en el título del formulario y sirve para buscar.
 
 Archivos de la aplicación (deben quedarse junto al `.exe`):
-- `seguimiento.db`: comentarios e historial. **No lo borres.**
-- `config_seguimiento.json`: tu nombre y las últimas rutas.
+- `seguimiento.db`: requerimientos, comentarios e historial. **No lo borres.**
 - `Cargas\`: copias de los reportes cargados.
-- `Respaldos\`: copias de seguridad de la base.
+- `Respaldos\`: copias de seguridad de la base. En `Respaldos\Automáticos` hay una copia diaria automática, de los últimos 15 días. Se hace al abrir la app o al cargar un reporte.
 - `errores.log`: detalle técnico de cualquier error (para revisarlo si algo falla).
 
-> La base está pensada para **una persona a la vez**. OneDrive sincroniza el archivo, pero si dos personas comentan al mismo tiempo desde equipos distintos, puede generarse un conflicto de versiones.
+La configuración de cada usuario (comprador, firma, rutas y plazos) está en `%APPDATA%\Seguimiento Ordenes\config.json`, no en la carpeta compartida.
 
 **Carga automática (opcional)**: con el Programador de tareas de Windows puedes ejecutar
 `"Seguimiento Ordenes.exe" --cargar "C:\...\Control de ordenes.csv"`. El resultado queda en `ultima_carga.log`, que empieza con uno de estos estados:
