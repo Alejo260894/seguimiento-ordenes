@@ -4,6 +4,7 @@ Seguimiento de órdenes — aplicación de escritorio.
 - "Cargar CSV de SAP": limpia el reporte, genera el control Excel del día y actualiza el seguimiento.
 - Pestaña "OC sin factura": OCs en proceso sin factura; estado, responsable, fecha compromiso y comentarios.
 - Pestaña "Facturas": facturas del último reporte (Pendiente de pago / Pagado) para revisar hasta su pago.
+- Pestaña "Consultar OC": el status de cualquier orden (SAP, facturas, requerimientos y seguimiento) en un solo lugar.
 - Los comentarios son por OC, se guardan en seguimiento.db (junto a la aplicación) y se arrastran a cada
   control nuevo; las facturas nuevas y los pagos detectados quedan registrados en el historial de la OC.
 - Varios compradores pueden usar la misma base (carpeta de red): cada uno tiene su configuración en
@@ -28,6 +29,7 @@ import seguimiento as sgm
 import requerimientos as rq
 import semaforo as sem
 import app_requerimientos as ui_req
+import app_consulta as ui_con
 
 BASE = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
 DB = os.path.join(BASE, "seguimiento.db")
@@ -109,7 +111,7 @@ def respaldo_diario(con):
     if os.path.exists(destino):
         return
     os.makedirs(carpeta, exist_ok=True)
-    tmp = destino + f".{os.getpid()}.tmp"
+    tmp = os.path.join(carpeta, f"~{os.getpid()}.tmp")      # nombre corto: rutas largas (límite de 260 caracteres)
     copia = sqlite3.connect(tmp)
     try:
         con.backup(copia)
@@ -321,12 +323,16 @@ class App(tk.Tk):
         tab_oc = ttk.Frame(self.nb)
         tab_fac = ttk.Frame(self.nb)
         tab_ind = ttk.Frame(self.nb)
+        tab_con = ttk.Frame(self.nb)
         self.nb.add(tab_req, text="  Requerimientos  ")
         self.nb.add(tab_oc, text="  OC sin factura (en proceso)  ")
         self.nb.add(tab_fac, text="  Facturas (pendientes de pago / pagadas)  ")
         self.nb.add(tab_ind, text="  Indicadores  ")
-        self.tabs = {str(tab_req): "req", str(tab_oc): "oc", str(tab_fac): "fac", str(tab_ind): "ind"}
+        self.nb.add(tab_con, text="  🔎 Consultar OC  ")
+        self.tab_req, self.tab_oc, self.tab_fac, self.tab_con = tab_req, tab_oc, tab_fac, tab_con
+        self.tabs = {str(tab_req): "req", str(tab_oc): "oc", str(tab_fac): "fac", str(tab_ind): "ind", str(tab_con): "con"}
         ui_req.construir(self, tab_req, tab_ind)
+        ui_con.construir(self, tab_con)
         self.nb.bind("<<NotebookTabChanged>>", lambda e: self.cambiar_pestana())
 
         filt = ttk.Frame(tab_oc, padding=(4, 6))
@@ -547,7 +553,10 @@ class App(tk.Tk):
         self.pintar()
         self.pintar_fac()
         self.refrescar_req()
-        if self.oc_sel and self.modo in ("oc", "fac"):
+        ui_con.refrescar(self)
+        if self.modo == "con" and self.con_oc:
+            ui_con.mostrar_status(self, self.con_oc)
+        if self.oc_sel and self.modo in ("oc", "fac", "con"):
             self.mostrar_detalle()        # el panel refleja lo que acaba de cambiar (p. ej. tras una carga)
 
     def refrescar_req(self):
@@ -657,7 +666,7 @@ class App(tk.Tk):
         self.modo = self.tabs[self.nb.select()]
         # El panel de detalle/comentarios es de las pestañas de OC y facturas
         visible = str(self.det) in self.paned.panes()
-        if self.modo in ("oc", "fac") and not visible:
+        if self.modo in ("oc", "fac", "con") and not visible:
             self.paned.add(self.det, weight=2)
             if self.sash:
                 self.after_idle(lambda: self.paned.sashpos(0, self.sash))
@@ -671,6 +680,8 @@ class App(tk.Tk):
             self.seleccionar()
         elif self.modo == "fac" and self.tree_fac.selection():
             self.seleccionar_fac()
+        elif self.modo == "con" and self.tree_con.selection():
+            ui_con.seleccionar(self)
 
     def seleccionar_fac(self):
         sel = self.tree_fac.selection()
@@ -840,6 +851,16 @@ class App(tk.Tk):
                           [f"  • {x['n_factura']}: {x['estado_factura'] or 'sin estado'}" for x in otras]
             self.lbl_info.config(text="\n".join(lineas))
             editable = False
+        elif self.modo == "con":
+            x = self.consulta.get(self.oc_sel)
+            if x is None:
+                return
+            self.lbl_oc.config(text=f"OC {x['oc']} · {x['proveedor']}")
+            lineas = [f"Comprador: {x['comprador'] or '-'} · Estado OC: {x['estado_sap']}", f"Status: {x['status']}", ""]
+            lineas.append(f"Seguimiento de OC sin factura: {f['situacion']}" if f is not None else
+                          "No pasó por «OC sin factura»: igual puedes comentarla y el comentario queda en su historial.")
+            self.lbl_info.config(text="\n".join(lineas))
+            editable = f is not None
         else:
             if f is None:
                 return
@@ -884,7 +905,7 @@ class App(tk.Tk):
 
     def _hay_pendientes(self):
         """¿Hay cambios escritos en el panel (estado, responsable, compromiso) que aún no se guardaron?"""
-        if self.modo != "oc" or not self.oc_sel or str(self.btn_guardar.cget("state")) == "disabled":
+        if self.modo not in ("oc", "con") or not self.oc_sel or str(self.btn_guardar.cget("state")) == "disabled":
             return False
         f = self._fila_sel()
         if f is None:
@@ -1012,7 +1033,7 @@ class App(tk.Tk):
     def _ir(self, destino):
         """Abre la pestaña y deja aplicados los filtros de «solo lo atrasado y en atención»."""
         if destino in ("req_hasta", "req_abiertos"):
-            self.nb.select(0)
+            self.nb.select(self.tab_req)
             for v in (self.vr_tipo, self.vr_controller, self.vr_mes):
                 v.set("Todos")
             self.vr_comprador.set(self.mio())
@@ -1022,13 +1043,13 @@ class App(tk.Tk):
             self.orden_req = ("plazo", False)
             ui_req.pintar_req(self)
         elif destino == "oc":
-            self.nb.select(1)
+            self.nb.select(self.tab_oc)
             self.limpiar_filtros()
             self.v_semaforo.set("Atrasado + Atención")
             self.orden = ("plazo", False)
             self.pintar()
         else:
-            self.nb.select(2)
+            self.nb.select(self.tab_fac)
             self.limpiar_filtros_fac()
             self.vf_semaforo.set("Vencidas + por vencer")
             self.orden_fac = ("dias_venc", False)

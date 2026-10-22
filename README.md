@@ -62,6 +62,18 @@ Para abrirla, haz doble clic en el `.exe`. No necesita Python. Tarda unos segund
    - Puedes comentar la OC de la factura seleccionada: el historial es único por OC.
    - En cada carga se registra en el historial de la OC cuando una factura **se paga** (con su fecha de pago), cuando aparece una **factura nueva** y cuando una factura **desaparece** del reporte (posible anulación).
 4. **🔄 Actualizar Excel con comentarios**: vuelve a generar el control del último reporte con los comentarios del momento. Si el Excel está abierto, se guarda una copia con la hora en el nombre.
+5. **Pestaña «🔎 Consultar OC»** (o **Ctrl+F** desde cualquier pestaña): el status de **cualquier** orden, sin importar en qué pestaña esté ni los filtros.
+   - Busca por N° de OC o de factura, RUC, proveedor, o COD / referencia del requerimiento (por ejemplo «SOLPED 282»).
+   - Busca entre todas las órdenes del último reporte SAP, más las de seguimiento, facturas y requerimientos, y es de cualquier comprador.
+   - El panel **Status de la orden** reúne:
+     - los datos de SAP;
+     - un status en una línea: pagada, pendiente de pago (con las vencidas), pago parcial, en proceso sin factura, cerrada o cancelada sin factura;
+     - cada factura con su vencimiento;
+     - los requerimientos y su etapa;
+     - el seguimiento y el último comentario.
+   - **📋 Copiar status** lo deja listo para pegar en un correo o chat.
+   - **Ver en OC sin factura**, **Ver en Facturas** y **Abrir requerimiento** te llevan a la orden en su pestaña, sin filtros que la oculten.
+   - Abajo se ven su historial y el cuadro de comentario, aunque la orden no esté en «OC sin factura».
 
 Filtros disponibles: texto, comprador, estado OC, situación, estado de seguimiento, solo sin comentarios y solo compromisos vencidos.
 
