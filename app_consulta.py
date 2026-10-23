@@ -8,11 +8,14 @@ import tkinter as tk
 from tkinter import ttk
 
 import consulta as cq
+import detalle_sap
 import seguimiento as sgm
 import app_requerimientos as ui_req
 
 COLS_CON = [("oc", "OC", 85, "e"), ("comprador", "Comprador", 115, "w"), ("proveedor", "Proveedor", 230, "w"),
-            ("fecha", "Fecha OC", 78, "center"), ("estado_sap", "Estado OC", 80, "w"), ("status", "Status", 300, "w")]
+            ("fecha", "Fecha OC", 78, "center"), ("estado_sap", "Estado OC", 80, "w"),
+            ("logistica", "Logística", 130, "w"), ("status", "Status", 260, "w")]
+VER = ["Búsqueda", "Pendientes de ingreso", detalle_sap.PENDIENTE, detalle_sap.PARCIAL]
 FONDO = {"ok": "#E2EFDA", "atencion": "#FCE4D6"}
 MAXIMO = 300
 
@@ -31,6 +34,7 @@ def construir(app, tab):
     app.vc_buscar.trace_add("write", lambda *_: _programar(app))
     app.ent_con.bind("<Return>", lambda e: pintar(app, elegir=True))
     app.ent_con.bind("<Down>", lambda e: _a_la_lista(app))
+    app.vc_ver = app._combo(top, "   Ver:", VER, 22, lambda: pintar(app))
     app.lbl_res_con = ttk.Label(tab, padding=(6, 0, 6, 4), foreground="#404040")
     app.lbl_res_con.pack(fill="x")
 
@@ -108,6 +112,9 @@ def pintar(app, elegir=False):
     t = app.tree_con
     sel = t.selection()
     t.delete(*t.get_children())
+    ver = app.vc_ver.get()
+    if ver != "Búsqueda":
+        return _pintar_pendientes(app, ver, q, sel)
     if len(q) < 2:
         app.lbl_res_con.config(text=f"Escribe para buscar entre las {len(app.consulta):,} órdenes que conoce la "
                                     f"aplicación (todas las del último reporte SAP, más las de seguimiento, facturas y "
@@ -119,7 +126,7 @@ def pintar(app, elegir=False):
     hits.sort(key=lambda x: str(x["oc"]) != q)            # el N° exacto primero; luego las más recientes
     for x in hits[:MAXIMO]:
         t.insert("", "end", iid=str(x["oc"]), tags=(x["nivel"],), values=(
-            x["oc"], x["comprador"], x["proveedor"], cq._fmt(x["fecha"]), x["estado_sap"], x["status"]))
+            x["oc"], x["comprador"], x["proveedor"], cq._fmt(x["fecha"]), x["estado_sap"], _logistica(x), x["status"]))
     extra = f" (se muestran las {MAXIMO} más recientes: escribe algo más específico)" if len(hits) > MAXIMO else ""
     app.lbl_res_con.config(text=f"{len(hits)} órdenes encontradas{extra}   ·   colores: verde = pagada, naranja = "
                                 f"requiere atención (sin factura en proceso o factura vencida), gris = cerrada / cancelada")
@@ -128,6 +135,31 @@ def pintar(app, elegir=False):
     elif elegir and hits and (len(hits) == 1 or str(hits[0]["oc"]) == q):
         t.selection_set(str(hits[0]["oc"]))
         t.see(str(hits[0]["oc"]))
+
+
+def _logistica(x):
+    sap = x["sap"] or {}
+    txt = x["logistica"]
+    if txt == detalle_sap.PARCIAL and sap.get("pct_atendido") is not None:
+        txt += f" ({sap['pct_atendido']:.0%})"
+    return txt
+
+
+def _pintar_pendientes(app, ver, q, sel):
+    """OC de bienes abiertas con material por ingresar (más antiguas primero)."""
+    estados = detalle_sap.PENDIENTES if ver == "Pendientes de ingreso" else (ver,)
+    filas = [x for x in app.consulta.values() if x["logistica"] in estados
+             and (not q or all(p in x["texto_busqueda"] for p in q.split()))]
+    filas.sort(key=lambda x: x["fecha"] or "")
+    t = app.tree_con
+    for x in filas:
+        t.insert("", "end", iid=str(x["oc"]), tags=("atencion",), values=(
+            x["oc"], x["comprador"], x["proveedor"], cq._fmt(x["fecha"]), x["estado_sap"], _logistica(x), x["status"]))
+    app.lbl_res_con.config(text=f"{len(filas)} OC de bienes {ver.lower()}   ·   las más antiguas primero   ·   una línea "
+                                f"facturada al 100 % cuenta como atendida aunque no tenga nota de entrada   ·   "
+                                f"la búsqueda filtra esta lista")
+    if sel and t.exists(sel[0]):
+        t.selection_set(sel[0])
 
 
 def seleccionar(app):
@@ -164,7 +196,8 @@ def mostrar_status(app, oc):
         return _limpiar_status(app)
     app.con_oc = oc
     u = sgm.ultima_carga(app.con)
-    texto = cq.texto_status(x, u["fecha_reporte"] if u else None, sgm.historial(app.con, oc))
+    texto = cq.texto_status(x, u["fecha_reporte"] if u else None, sgm.historial(app.con, oc),
+                            lineas=detalle_sap.lineas_oc(app.con, oc))
     t = app.txt_con
     t.delete("1.0", "end")
     t.insert("1.0", texto)

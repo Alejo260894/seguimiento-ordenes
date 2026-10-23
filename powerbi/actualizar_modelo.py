@@ -23,7 +23,7 @@ COLUMNAS = {
     "Ordenes": [("Cumplimiento", "texto"), ("Cumplimiento evaluado", "texto"), ("% desviación facturado", "porcentaje"),
                 ("Días OC → 1ra factura", "entero"), ("Factura a tiempo", "texto"),
                 ("Tipo OC", "texto"), ("Estado logístico", "texto"), ("Fecha última entrada", "fecha"),
-                ("% ingresado", "porcentaje"), ("Proyecto", "texto"), ("Unidad de negocio", "texto"), ("Área", "texto"),
+                ("% atendido", "porcentaje"), ("Proyecto", "texto"), ("Unidad de negocio", "texto"), ("Área", "texto"),
                 ("Días OC → aprobación", "entero"), ("Días OC → entrada", "entero"), ("Días factura → pago", "entero")],
     "Requerimientos": [("Monto referencial", "decimal"), ("Tipo de referencia", "texto"), ("Ahorro", "decimal"),
                        ("Base del ahorro", "decimal"), ("% ahorro", "porcentaje"), ("Fecha de conformidad", "fecha"),
@@ -38,8 +38,12 @@ COLUMNAS = {
                ("Descripción", "texto"), ("Cantidad", "decimal"), ("UM", "texto"), ("Total línea sin IGV", "decimal"),
                ("Moneda", "texto"), ("Proyecto", "texto"), ("Unidad de negocio", "texto"), ("Área", "texto"),
                ("Cantidad ingresada", "decimal"), ("Pendiente de ingreso", "decimal"), ("Estado logístico", "texto"),
-               ("Fecha de entrada", "fecha")],
+               ("Fecha de entrada", "fecha"), ("Facturado sin IGV", "decimal"), ("Estado de la línea", "texto")],
 }
+# Columnas renombradas en «Datos Power BI.xlsx»: {tabla: {nombre anterior: nombre nuevo}}
+RENOMBRADAS = {"Ordenes": {"% ingresado": "% atendido"}}
+# Medidas que ya no se usan (se borran del modelo)
+OBSOLETAS = ["OC con ingreso parcial"]
 # Tablas nuevas: (columna en la tabla, tabla y columna del lado «uno» de la relación)
 TABLAS_NUEVAS = {"Proveedores": ("Ordenes.RUC", "Proveedores.RUC"), "Lineas": ("Lineas.OC", "Ordenes.OC")}
 TIPOS = {  # tipo -> (dataType, formatString, summarizeBy, tipo M)
@@ -81,8 +85,12 @@ MEDIDAS = [
     ("OTIF (a tiempo y completo)", 'VAR v = [OTIF %] RETURN IF(ISBLANK(v), "Sin datos aún", FORMAT(v, "0.0%"))', None),
     ("Lead time a la entrega (días)", 'VAR v = [Lead time a la entrega] RETURN IF(ISBLANK(v), "Sin datos aún", FORMAT(v, "0.0"))', None),
     # Logística (reporte de detalle)
-    ("OC pendientes de ingreso", 'CALCULATE([N° OC], Ordenes[Estado logístico] = "Pendiente de ingreso")', "#,0"),
-    ("OC con ingreso parcial", 'CALCULATE([N° OC], Ordenes[Estado logístico] = "Ingreso parcial")', "#,0"),
+    # OC de bienes abiertas con material por ingresar (una línea facturada al 100 % cuenta como atendida)
+    ("OC pendientes de ingreso", 'CALCULATE([N° OC], Ordenes[Estado logístico] IN {"Pendiente de atención", "Atención parcial"})', "#,0"),
+    ("OC pendientes de atención", 'CALCULATE([N° OC], Ordenes[Estado logístico] = "Pendiente de atención")', "#,0"),
+    ("OC con atención parcial", 'CALCULATE([N° OC], Ordenes[Estado logístico] = "Atención parcial")', "#,0"),
+    ("Líneas pendientes de ingreso", 'COALESCE(CALCULATE(COUNTROWS(Lineas), Lineas[Estado de la línea] IN {"Pendiente de ingreso", "Ingreso parcial"}, '
+                                     'Ordenes[Estado logístico] IN {"Pendiente de atención", "Atención parcial"}), 0)', "#,0"),
     ("OC ingresadas sin factura", 'CALCULATE([N° OC], Ordenes[Categoría] = "Pendiente de factura (nota de entrada)")', "#,0"),
     ("Prom. días OC → aprobación", "AVERAGE(Ordenes[Días OC → aprobación])", "0.0"),
     ("Prom. días OC → entrada", "AVERAGE(Ordenes[Días OC → entrada])", "0.0"),
@@ -115,6 +123,22 @@ def _columnas_existentes(txt):
 def _ruta_excel():
     txt = open(os.path.join(TABLAS, "Ordenes.tmdl"), encoding="utf-8").read()
     return re.search(r'File\.Contents\("([^"]+)"\)', txt).group(1)
+
+
+def renombrar_columnas(tabla):
+    """Columna renombrada en el Excel: se cambia en el modelo (declaración, sourceColumn y paso de tipos)."""
+    ruta = os.path.join(TABLAS, f"{tabla}.tmdl")
+    txt = open(ruta, encoding="utf-8").read()
+    n = 0
+    for viejo, nuevo in RENOMBRADAS.get(tabla, {}).items():
+        if viejo in _columnas_existentes(txt) and nuevo not in _columnas_existentes(txt):
+            txt = (txt.replace(f"\tcolumn {_q(viejo)}\n", f"\tcolumn {_q(nuevo)}\n")
+                      .replace(f"sourceColumn: {viejo}\n", f"sourceColumn: {nuevo}\n")
+                      .replace(f'{{"{viejo}", ', f'{{"{nuevo}", '))
+            n += 1
+    if n:
+        open(ruta, "w", encoding="utf-8", newline="").write(txt)
+    return n
 
 
 def columnas_en_tabla(tabla):
@@ -173,6 +197,12 @@ def medidas():
     choque = [n for n, _, _ in MEDIDAS if n in columnas]
     if choque:
         sys.exit(f"Medidas con el mismo nombre que una columna: {choque}")
+    # Medidas obsoletas: se quita su bloque (hasta la línea en blanco)
+    for n in OBSOLETAS:
+        txt = re.sub(rf"^\tmeasure {re.escape(_q(n))} = .*?\n\n", "", txt, flags=re.M | re.S)
+    # Medidas existentes con otra fórmula: se actualiza la expresión
+    for n, e, _ in MEDIDAS:
+        txt = re.sub(rf"^(\tmeasure {re.escape(_q(n))} = ).*$", lambda m: m.group(1) + e, txt, flags=re.M)
     nuevas = [(n, e, f) for n, e, f in MEDIDAS if n not in existentes]
     bloque = "".join(f"\tmeasure {_q(n)} = {e}\n" + (f"\t\tformatString: {f}\n" if f else "")
                      + f"\t\tdisplayFolder: {CARPETA}\n\t\tlineageTag: {uuid.uuid4()}\n\n" for n, e, f in nuevas)
@@ -182,6 +212,7 @@ def medidas():
 
 
 def main():
+    print("Ordenes: columnas renombradas", renombrar_columnas("Ordenes"))
     print("Ordenes: columnas nuevas", columnas_en_tabla("Ordenes"))
     print("Requerimientos: columnas nuevas", columnas_en_tabla("Requerimientos"))
     for nombre in TABLAS_NUEVAS:

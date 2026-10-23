@@ -120,7 +120,7 @@ def tablas(con, umbrales):
                "Responsable", "Fecha compromiso", "Días desde la OC", "Plazo OC", "N° comentarios",
                "Último comentario", "Fecha último comentario", "Requerimientos", "Cumplimiento",
                "Cumplimiento evaluado", "% desviación facturado", "Días OC → 1ra factura", "Factura a tiempo",
-               "Tipo OC", "Estado logístico", "Fecha última entrada", "% ingresado", "Proyecto", "Unidad de negocio",
+               "Tipo OC", "Estado logístico", "Fecha última entrada", "% atendido", "Proyecto", "Unidad de negocio",
                "Área", "Días OC → aprobación", "Días OC → entrada", "Días factura → pago"]
 
     facturas = []
@@ -200,11 +200,12 @@ def lineas(con):
     """Tabla Lineas: una fila por línea de OC (solo OC aprobadas, del reporte de detalle)."""
     filas = [[r["numero_oc"], r["linea"], r["tipo_oc"], r["codigo"], r["descripcion"], r["cantidad"], r["um"],
               r["total_linea"], MON.get(r["moneda"], r["moneda"]), r["proyecto"], r["unidad_negocio"], r["area"],
-              r["ingresado"], r["pendiente_ingreso"], r["estado_logistico"], _d(r["fecha_entrada"])]
+              r["ingresado"], r["pendiente_ingreso"], r["estado_logistico"], _d(r["fecha_entrada"]), r["facturado"],
+              r["estado_linea"] or ""]
              for r in con.execute("SELECT * FROM detalle_lineas ORDER BY numero_oc, linea")]
     return (["OC", "Línea", "Tipo OC", "Código", "Descripción", "Cantidad", "UM", "Total línea sin IGV", "Moneda",
              "Proyecto", "Unidad de negocio", "Área", "Cantidad ingresada", "Pendiente de ingreso", "Estado logístico",
-             "Fecha de entrada"], filas)
+             "Fecha de entrada", "Facturado sin IGV", "Estado de la línea"], filas)
 
 
 def kpi_req(f, kpi_oc):

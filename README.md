@@ -70,6 +70,7 @@ Para abrirla, haz doble clic en el `.exe`. No necesita Python. Tarda unos segund
    - En cada carga se registra en el historial de la OC cuando una factura **se paga** (con su fecha de pago), cuando aparece una **factura nueva** y cuando una factura **desaparece** del reporte (posible anulación).
 4. **🔄 Actualizar Excel con comentarios**: vuelve a generar el control del último reporte con los comentarios del momento. Si el Excel está abierto, se guarda una copia con la hora en el nombre.
 5. **Pestaña «🔎 Consultar OC»** (o **Ctrl+F** desde cualquier pestaña): el status de **cualquier** orden, sin importar en qué pestaña esté ni los filtros.
+   - **Ver: Pendientes de ingreso** (o solo *Pendiente de atención* / *Atención parcial*) lista las OC de bienes abiertas con material por ingresar, de la más antigua a la más reciente. La búsqueda filtra esa lista. Al elegir una OC, el status muestra **cada línea** con su estado (ingresada, atendida por factura, ingreso parcial o pendiente de ingreso).
    - Busca por N° de OC o de factura, RUC, proveedor, o COD / referencia del requerimiento (por ejemplo «SOLPED 282»).
    - Busca entre todas las órdenes del último reporte SAP, más las de seguimiento, facturas y requerimientos, y es de cualquier comprador.
    - El panel **Status de la orden** reúne:
@@ -84,9 +85,18 @@ Para abrirla, haz doble clic en el `.exe`. No necesita Python. Tarda unos segund
 
 Filtros disponibles: texto, comprador, estado OC, situación, estado de seguimiento, **logística**, solo sin comentarios y solo compromisos vencidos.
 
-La columna **Logística** viene del reporte de detalle:
-- Pendiente de ingreso, Ingreso parcial (con su %) o Material ingresado, con la fecha de la última nota de entrada;
-- «Servicio» en las OC de servicios.
+La columna **Logística** viene del reporte de detalle y mide la **atención** de las OC de bienes. Como el registro de notas de entrada es reciente, **la factura también cuenta**:
+- **Línea**:
+  - *Ingresada*: tiene nota de entrada por toda la cantidad.
+  - *Atendida por factura*: está facturada al 100 %, aunque no tenga nota.
+  - *Ingreso parcial*.
+  - *Pendiente de ingreso*: sin nota de entrada ni factura.
+- **OC**:
+  - **Atendida**: todas sus líneas están atendidas, o la OC está facturada por completo.
+  - **Atención parcial**, con su %.
+  - **Pendiente de atención**.
+  - Si SAP ya la cerró: *Cerrada con atención parcial* o *Cerrada sin ingreso*.
+  - Las OC de servicios figuran como «Servicio» y se siguen por factura.
 
 Con eso se distingue la OC que espera el material de la que espera la factura. En Facturas, las pagadas en parte se ven como **Pago parcial**. En los requerimientos, la fecha de la última nota de entrada llena sola la **conformidad** de los bienes recibidos por completo, y se usa para el OTIF.
 
@@ -152,10 +162,10 @@ El nombre exacto de cada columna «Días: …» se ve en la tabla Requerimientos
 - Una tabla de las OC «En proceso sin factura» con Días desde la OC, Responsable y Último comentario.
 
 **Página «Logística»** (tabla Lineas y columnas nuevas de Ordenes):
-- OC de bienes pendientes de ingreso, con ingreso parcial e ingresadas sin factura;
+- OC pendientes de ingreso (pendientes de atención y con atención parcial), **líneas pendientes de ingreso** y OC ingresadas sin factura;
 - días promedio de la OC a la aprobación, de la OC a la nota de entrada y de la factura al pago;
 - filtros por unidad de negocio, proyecto y comprador;
-- la lista de OC que esperan material, con su antigüedad.
+- la tabla de **líneas pendientes de ingreso** de las OC abiertas, con descripción, cantidad pedida e ingresada.
 
 **KPIs de abastecimiento** (página «KPIs de abastecimiento» y tabla Proveedores):
 

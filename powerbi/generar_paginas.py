@@ -379,22 +379,25 @@ def pagina_tiempos():
     return "Tiempos", vs
 
 
-COLORES_LOGISTICA = {"Pendiente de ingreso": "#EA580C", "Ingreso parcial": AMBAR, "Material ingresado": VERDE,
-                     "Facturado sin ingreso": "#7C3AED", "Cerrada sin ingreso": GRIS, "Servicio": "#60A5FA"}
+COLORES_LOGISTICA = {"Pendiente de atención": "#EA580C", "Atención parcial": AMBAR, "Atendida": VERDE,
+                     "Cerrada con atención parcial": "#A78BFA", "Cerrada sin ingreso": GRIS, "OC cancelada": "#64748B",
+                     "Servicio": "#60A5FA"}
+PENDIENTES_OC = ["Pendiente de atención", "Atención parcial"]
+PENDIENTES_LINEA = ["Pendiente de ingreso", "Ingreso parcial"]
 
 
 def pagina_logistica():
     p = "logistica"
     vs = [encabezado(p, "Logística", "Ingreso de material (notas de entrada), líneas de OC y ciclo de abastecimiento")]
-    vs += tarjetas(p, 0, ["OC pendientes de ingreso", "OC con ingreso parcial", "OC ingresadas sin factura",
-                          "Prom. días OC → aprobación", "Prom. días OC → entrada", "Prom. días factura → pago"],
-                   acentos=["#EA580C", AMBAR, "#0891B2", "#2563EB", "#7C3AED", VERDE])
+    vs += tarjetas(p, 0, ["OC pendientes de ingreso", "OC pendientes de atención", "OC con atención parcial",
+                          "Líneas pendientes de ingreso", "OC ingresadas sin factura", "Prom. días OC → entrada"],
+                   acentos=["#E11D48", "#EA580C", AMBAR, "#7C3AED", "#0891B2", "#2563EB"])
     vs += segmentadores(p, 10, [("Ordenes", "Unidad de negocio"), ("Ordenes", "Proyecto"), ("Ordenes", "Comprador")])
     a, b = fila(2)
     articulos = filtro_in("fArt", "Ordenes", "Tipo OC", ["Artículo"])
     vs.append(visual(p, 20, "barChart", *a, {"Category": [col("Ordenes", "Estado logístico")], "Y": [med("N° OC")]},
                      titulo="OC de bienes por estado logístico",
-                     subtitulo="Según las notas de entrada del reporte de detalle (solo OC aprobadas)",
+                     subtitulo="Atendida = ingresada o facturada al 100 % (el registro de notas de entrada es reciente)",
                      objetos={**colores("Ordenes", "Estado logístico", COLORES_LOGISTICA),
                               "labels": [{"properties": {"show": _lit(True)}}]},
                      filtros=[articulos], orden=(med("N° OC"), True)))
@@ -405,10 +408,14 @@ def pagina_logistica():
                      subtitulo="Unidad de negocio de la línea de mayor monto de cada OC", orden=(n_oc, True),
                      objetos=colores("Ordenes", "Tipo OC", {"Servicio": "#60A5FA", "Artículo": "#EA580C"})))
     vs.append(visual(p, 22, "tableEx", M, TABLA[0], ANCHO - 2 * M, TABLA[1], {"Values": [
-        col("Ordenes", c) for c in ("OC", "Comprador", "Proveedor", "Fecha OC", "Días desde la OC", "Estado logístico",
-                                    "% ingresado", "Fecha última entrada", "Proyecto", "Unidad de negocio")]},
-        titulo="OC de bienes pendientes de ingreso o con ingreso parcial",
-        filtros=[filtro_in("fPendIng", "Ordenes", "Estado logístico", ["Pendiente de ingreso", "Ingreso parcial"])]))
+        col("Ordenes", c) for c in ("OC", "Proveedor", "Comprador", "Días desde la OC", "Estado logístico")] + [
+        col("Lineas", c) for c in ("Línea", "Descripción", "Cantidad", "Cantidad ingresada", "Estado de la línea")]},
+        titulo="Pendientes de ingreso: líneas de OC abiertas sin nota de entrada ni factura",
+        subtitulo="OC en «Pendiente de atención» o «Atención parcial»",
+        objetos={"columnWidth": [{"properties": {"value": _lit(330)}, "selector": {"metadata": "Lineas.Descripción"}},
+                                 {"properties": {"value": _lit(250)}, "selector": {"metadata": "Ordenes.Proveedor"}}]},
+        filtros=[filtro_in("fPendOC", "Ordenes", "Estado logístico", PENDIENTES_OC),
+                 filtro_in("fPendLin", "Lineas", "Estado de la línea", PENDIENTES_LINEA)]))
     return "Logística", vs
 
 

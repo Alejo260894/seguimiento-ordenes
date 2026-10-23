@@ -69,9 +69,9 @@ def texto_logistica(f):
     if not f.get("logistica"):
         return ""
     txt = f["logistica"]
-    if f["logistica"] == "Ingreso parcial" and f.get("pct_ingresado") is not None:
+    if f["logistica"] in (detalle_sap.PARCIAL, "Cerrada con atención parcial") and f.get("pct_ingresado") is not None:
         txt += f" ({f['pct_ingresado']:.0%})"
-    if f.get("fecha_entrada") and f["logistica"] in ("Material ingresado", "Ingreso parcial"):
+    if f.get("fecha_entrada") and f["logistica"] in (detalle_sap.ATENDIDA, detalle_sap.PARCIAL):
         txt += f" · {fmt_fecha(f['fecha_entrada'])}"
     return txt
 

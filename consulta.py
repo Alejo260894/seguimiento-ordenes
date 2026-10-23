@@ -70,8 +70,9 @@ def _resumen(x):
     }
     d["status"], d["nivel"] = status(x)
     d["categoria"] = next((c for p, c in CATEGORIAS if d["status"].startswith(p)), "Otro")
+    d["logistica"] = (sap or {}).get("estado_logistico") or ""        # del reporte de detalle
     d["texto_busqueda"] = " ".join(str(v or "") for v in (
-        x["oc"], d["comprador"], d["proveedor"], d["ruc"], d["status"],
+        x["oc"], d["comprador"], d["proveedor"], d["ruc"], d["status"], d["logistica"],
         *(f["n_factura"] for f in fx),
         *(f"{q['id']:03d} {q['referencia']} {q['proyecto']} {q.get('proyecto_nombre', '')}" for q in x["reqs"]))).lower()
     return d
@@ -117,8 +118,29 @@ def status(x, hoy=None):
     return txt, "atencion" if vencidas else "pendiente"
 
 
-def texto_status(x, fecha_reporte=None, comentarios=(), hoy=None):
-    """Status completo de la orden, en texto para copiar (correo, chat…)."""
+def texto_lineas(lineas, maximo=25):
+    """Líneas de la OC con su estado de atención (reporte de detalle)."""
+    L = []
+    for r in lineas[:maximo]:
+        cant = f"{r['cantidad']:g} {r['um'] or ''}".strip() if r["cantidad"] else ""
+        estado = r.get("estado_linea") or r["estado_logistico"] or ""
+        if estado == "Ingreso parcial":
+            if r["ingresado"] and r["cantidad"]:
+                estado += f" ({r['ingresado']:g} de {r['cantidad']:g} ingresados)"
+            elif r.get("facturado") and r["total_linea"]:
+                estado += f" (facturado {min(r['facturado'] / r['total_linea'], 1):.0%}, sin nota de entrada)"
+        if r["fecha_entrada"] and estado.startswith(("Ingresada", "Ingreso parcial")):
+            estado += f" · nota de entrada {_fmt(r['fecha_entrada'])}"
+        desc = (r["descripcion"] or r["codigo"] or "")[:60]
+        L.append(f"  {r['linea']}. {desc}" + (f" · {cant}" if cant else "") + f" · {estado}")
+    if len(lineas) > maximo:
+        L.append(f"  … y {len(lineas) - maximo} líneas más")
+    return L
+
+
+def texto_status(x, fecha_reporte=None, comentarios=(), hoy=None, lineas=()):
+    """Status completo de la orden, en texto para copiar (correo, chat…).
+    `lineas`: líneas del reporte de detalle (detalle_sap.lineas_oc) para mostrar qué falta ingresar."""
     hoy = hoy or date.today()
     sap, o = x["sap"], x["orden"]
     L = [f"OC {x['oc']} · {x['proveedor'] or '(sin proveedor)'}" + (f" (RUC {x['ruc']})" if x["ruc"] else "")]
@@ -187,6 +209,10 @@ def texto_status(x, fecha_reporte=None, comentarios=(), hoy=None):
     if usuario:
         c = usuario[-1]
         L.append(f"Último comentario ({_fmt(c['fecha'][:10])}, {c['autor']}): {c['texto']}")
+    if lineas:
+        pendientes = sum(1 for r in lineas if (r.get("estado_linea") or "") in ("Pendiente de ingreso", "Ingreso parcial"))
+        L += ["", f"Líneas de la OC ({len(lineas)}" + (f", {pendientes} con ingreso pendiente" if pendientes else "") + "):"]
+        L += texto_lineas(lineas)
     if fecha_reporte:
         L += ["", f"Según el reporte SAP del {_fmt(fecha_reporte[:10])} {fecha_reporte[11:16]}."]
     return "\n".join(L)

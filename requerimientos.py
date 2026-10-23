@@ -136,7 +136,8 @@ def preparar(con):
     _agregar_columna(con, "sap_fact", "monto", "REAL")               # FT Sin Imp. de cada factura
     _agregar_columna(con, "req", "manual", "TEXT DEFAULT '[]'")      # campos que el usuario vació a propósito
     _agregar_columna(con, "sap_oc", "serie", "TEXT DEFAULT ''")      # OCB/OCS: excepción de nota de entrada
-    for col, tipo in (("tipo_oc", "TEXT"), ("estado_logistico", "TEXT"), ("ingresado", "INTEGER"), ("fecha_entrada", "TEXT")):
+    for col, tipo in (("tipo_oc", "TEXT"), ("estado_logistico", "TEXT"), ("ingresado", "INTEGER"), ("fecha_entrada", "TEXT"),
+                      ("pct_atendido", "REAL")):
         _agregar_columna(con, "sap_oc", col, tipo)                   # del reporte de detalle (detalle_sap.enlazar)
     _agregar_columna(con, "req", "monto_ref", "REAL")
     _agregar_columna(con, "req", "tipo_ref", "TEXT DEFAULT ''")
@@ -362,7 +363,7 @@ def datos_sap(con, orden):
          "estado_oc": sgm.estado_visible(oc["serie"], oc["estado"], oc["fecha"], oc["ingresado"]),
          "facturas": fac, "sin_pago": "", "logistica": oc["estado_logistico"] or "", "fecha_entrada": oc["fecha_entrada"] or ""}
     # Bienes recibidos por completo: la fecha de la última nota de entrada es la conformidad (entrega real, OTIF)
-    if oc["estado_logistico"] == "Material ingresado" and oc["fecha_entrada"]:
+    if oc["estado_logistico"] == detalle_sap.ATENDIDA and oc["fecha_entrada"]:
         d["f_conformidad"] = oc["fecha_entrada"]
     if fac:
         d["num_factura"] = ", ".join(f["n_factura"] for f in fac)

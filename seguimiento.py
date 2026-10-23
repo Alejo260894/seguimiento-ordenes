@@ -78,7 +78,8 @@ CREATE INDEX IF NOT EXISTS ix_fact_oc ON facturas(numero_oc);
 CREATE TABLE IF NOT EXISTS detalle_lineas (
     numero_oc INTEGER, linea INTEGER, tipo_oc TEXT, codigo TEXT, descripcion TEXT, cantidad REAL, um TEXT,
     total_linea REAL, moneda TEXT, proyecto TEXT, unidad_negocio TEXT, area TEXT, ingresado REAL,
-    pendiente_ingreso REAL, estado_logistico TEXT, fecha_entrada TEXT, PRIMARY KEY (numero_oc, linea)
+    pendiente_ingreso REAL, estado_logistico TEXT, fecha_entrada TEXT, facturado REAL, estado_linea TEXT,
+    PRIMARY KEY (numero_oc, linea)
 );
 CREATE TABLE IF NOT EXISTS detalle_entradas (
     numero_oc INTEGER, linea INTEGER, n_entrada TEXT, fecha TEXT, cantidad REAL, almacen TEXT
@@ -90,7 +91,7 @@ CREATE TABLE IF NOT EXISTS detalle_facturas (
 CREATE INDEX IF NOT EXISTS ix_det_fact_oc ON detalle_facturas(numero_oc);
 CREATE TABLE IF NOT EXISTS detalle_oc (
     numero_oc INTEGER PRIMARY KEY, tipo_oc TEXT, estado_logistico TEXT, ingresado INTEGER, fecha_entrada TEXT,
-    pct_ingresado REAL, proyecto TEXT, unidad_negocio TEXT, area TEXT, n_lineas INTEGER
+    pct_ingresado REAL, proyecto TEXT, unidad_negocio TEXT, area TEXT, n_lineas INTEGER    -- pct = % atendido
 );
 CREATE TABLE IF NOT EXISTS detalle_cargas (
     id INTEGER PRIMARY KEY AUTOINCREMENT, archivo TEXT, fecha_archivo TEXT, fecha_carga TEXT, filas INTEGER, ocs INTEGER
@@ -109,6 +110,11 @@ def conectar(path):
     con = sqlite3.connect(path, timeout=60)
     con.row_factory = sqlite3.Row
     con.executescript(SCHEMA)
+    # Bases con el detalle anterior al estado por línea: se agregan las columnas que faltan
+    tiene = {r[1] for r in con.execute("PRAGMA table_info(detalle_lineas)")}
+    for col, tipo in (("facturado", "REAL"), ("estado_linea", "TEXT")):
+        if col not in tiene:
+            con.execute(f"ALTER TABLE detalle_lineas ADD COLUMN {col} {tipo}")
     if con.execute("PRAGMA user_version").fetchone()[0] < 1:
         # Limpieza única (versión 1): OCs que entraron ya Cerradas/Canceladas con reglas anteriores y nadie trabajó
         sin_trabajo = """SELECT numero_oc FROM ordenes o WHERE estado_oc IN ('Cerrado','Cancelado') AND situacion='Activa'
