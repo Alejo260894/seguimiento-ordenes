@@ -18,6 +18,8 @@ from datetime import date, datetime, timedelta
 
 import pandas as pd
 
+import seguimiento as sgm
+
 # Campos de un requerimiento: (columna en la base, encabezado en el Excel CONTROL, tipo)
 CAMPOS = [
     ("id", "COD", "int"), ("proyecto", "PROY2", "txt"), ("referencia", "REFERENCIA", "txt"),
@@ -132,6 +134,7 @@ def preparar(con):
     con.executescript(SCHEMA)
     _agregar_columna(con, "sap_fact", "monto", "REAL")               # FT Sin Imp. de cada factura
     _agregar_columna(con, "req", "manual", "TEXT DEFAULT '[]'")      # campos que el usuario vació a propósito
+    _agregar_columna(con, "sap_oc", "serie", "TEXT DEFAULT ''")      # OCB/OCS: excepción de nota de entrada
     _agregar_columna(con, "req", "monto_ref", "REAL")
     _agregar_columna(con, "req", "tipo_ref", "TEXT DEFAULT ''")
     _agregar_columna(con, "req", "f_conformidad", "TEXT DEFAULT ''")
@@ -328,9 +331,10 @@ def guardar_snapshot_sap(con, df):
     """Foto del último reporte SAP limpio (procesar_sap.limpiar), para completar requerimientos."""
     cab = df.drop_duplicates("Numero OC")
     con.execute("DELETE FROM sap_oc")
-    con.executemany("INSERT INTO sap_oc VALUES (?,?,?,?,?,?,?,?,?)", [
+    con.executemany("INSERT INTO sap_oc(numero_oc, fecha, aprobacion, usuario, proveedor, ruc, mon, total, estado, serie) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)", [
         (int(r["Numero OC"]), _iso(r["Fecha"]), _iso(r["Aprobación"]), r["Usuario"], r["Proveedor"], r["RUC"],
-         MON_SAP.get(r["Mon"], r["Mon"]), _num(r["Total Sin IGV"]), r["Estado"]) for _, r in cab.iterrows()])
+         MON_SAP.get(r["Mon"], r["Mon"]), _num(r["Total Sin IGV"]), r["Estado"], r["Serie"]) for _, r in cab.iterrows()])
     con.execute("DELETE FROM sap_fact")
     fx = df[df["N° Factura"] != ""]
     con.executemany("INSERT INTO sap_fact(numero_oc, n_factura, estado, contab, emision, fecha_pago, monto) "
@@ -348,8 +352,10 @@ def datos_sap(con, orden):
     if oc is None:
         return None
     fac = [dict(r) for r in con.execute("SELECT * FROM sap_fact WHERE numero_oc=? ORDER BY contab", (int(orden),))]
+    nota = sgm.con_nota_entrada(oc["serie"], oc["estado"], oc["fecha"])
     d = {"emision_oc": oc["fecha"], "aprob_oc": oc["aprobacion"], "proveedor": oc["proveedor"],
-         "monto": oc["total"], "moneda": oc["mon"], "estado_oc": oc["estado"], "facturas": fac, "sin_pago": ""}
+         "monto": oc["total"], "moneda": oc["mon"], "estado_oc": sgm.estado_visible(oc["serie"], oc["estado"], oc["fecha"]),
+         "facturas": fac, "sin_pago": ""}
     if fac:
         d["num_factura"] = ", ".join(f["n_factura"] for f in fac)
         contab = [f["contab"] for f in fac if f["contab"]]
@@ -357,7 +363,8 @@ def datos_sap(con, orden):
             d["recepcion_fact"] = min(contab)
         pagadas = [f for f in fac if f["estado"] == "Pagado" and f["fecha_pago"]]
         facturado = sum(f["monto"] or 0 for f in fac)
-        completa = oc["estado"] == "Cerrado" or bool(oc["total"]) and facturado >= 0.995 * oc["total"]
+        # «Cerrado» con nota de entrada solo dice que se recibió todo: para estar completa debe estar facturada
+        completa = oc["estado"] == "Cerrado" and not nota or bool(oc["total"]) and facturado >= 0.995 * oc["total"]
         # Fecha de pago: todas las facturas pagadas Y la orden cerrada o facturada al 100 % (si no, es un pago parcial)
         if len(pagadas) == len(fac) and completa:
             d["fecha_pago"] = max(f["fecha_pago"] for f in pagadas)
@@ -543,7 +550,7 @@ def etapa(r):
         return "Pagado", r["fecha_pago"]
     if cierre:
         return cierre, r["modificado"][:10] if r.get("modificado") else ""
-    if r.get("sap_estado") in SAP_CIERRE and not r.get("sap_n_fact") and not r["num_factura"]:
+    if r.get("sap_estado") in SAP_CIERRE and not r.get("sap_nota_entrada") and not r.get("sap_n_fact") and not r["num_factura"]:
         return SAP_CIERRE[r["sap_estado"]], ""
     for nombre, campo in reversed(ETAPAS):
         if r[campo]:
@@ -557,6 +564,8 @@ def etapa(r):
 def listar(con):
     proys = {r["codigo"]: dict(r) for r in con.execute("SELECT * FROM cat_proyectos")}
     sap = {r["numero_oc"]: r["estado"] for r in con.execute("SELECT numero_oc, estado FROM sap_oc")}
+    nota_entrada = {r["numero_oc"] for r in con.execute("SELECT numero_oc, serie, estado, fecha FROM sap_oc")
+                    if sgm.con_nota_entrada(r["serie"], r["estado"], r["fecha"])}
     n_fact = dict(con.execute("SELECT numero_oc, COUNT(*) FROM sap_fact GROUP BY numero_oc").fetchall())
     # Último comentario de usuario de cada OC (pestañas de seguimiento de OC y facturas)
     com = {}
@@ -569,6 +578,7 @@ def listar(con):
     for r in con.execute("SELECT * FROM req ORDER BY id"):
         d = dict(r)
         d["sap_estado"] = sap.get(d["orden"], "") if d["orden"] else ""
+        d["sap_nota_entrada"] = d["orden"] in nota_entrada
         d["sap_n_fact"] = n_fact.get(d["orden"], 0) if d["orden"] else 0
         d["com_oc"] = com.get(d["orden"], "") if d["orden"] else ""
         d["etapa"], ini = etapa(d)

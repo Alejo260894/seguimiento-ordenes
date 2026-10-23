@@ -4,6 +4,8 @@ Base de seguimiento de órdenes sin factura (SQLite).
 Cada carga de un reporte SAP sincroniza la base:
 - OC sin ninguna factura vigente y que NO está Cerrada ni Cancelada -> entra (o sigue) en seguimiento.
   (Una OC Cerrada o Cancelada sin factura ya no se va a facturar: no se trata.)
+  Excepción: una OC de bienes (serie OCB) «Cerrada» desde NOTA_ENTRADA_DESDE tiene nota de entrada: se atendió
+  completa y solo falta ingresar la factura, así que sí se sigue.
 - OC en seguimiento que ya tiene factura -> se cierra como "Facturada" (queda el historial).
 - OC en seguimiento que pasa a Cerrada/Cancelada sin factura -> se cierra como "OC cerrada/cancelada sin factura".
 - OC en seguimiento que ya no aparece en el reporte -> se cierra como "Fuera del reporte".
@@ -24,6 +26,21 @@ SIT_CERRADA_SAP = "OC cerrada sin factura"     # la OC se cerró en SAP sin fact
 SIT_CANCELADA_SAP = "OC cancelada sin factura"  # la OC se canceló en SAP sin facturar
 # Estado de la OC en SAP que la saca del seguimiento -> situación con la que se cierra
 ESTADOS_FINALES = {"Cerrado": SIT_CERRADA_SAP, "Cancelado": SIT_CANCELADA_SAP}
+# Desde esta fecha de OC, en las OC de bienes (serie OCB / 26OCB) «Cerrado» significa que ya tienen nota de entrada
+# (atendidas en su totalidad) y solo falta la factura: no es un cierre sin factura.
+NOTA_ENTRADA_DESDE = "2026-09-01"
+TXT_NOTA_ENTRADA = "Cerrado (nota de entrada)"
+
+
+def con_nota_entrada(serie, estado, fecha_oc):
+    """¿OC de bienes cerrada con nota de entrada (pendiente de factura, no cerrada sin factura)?"""
+    return (estado == "Cerrado" and str(serie or "").strip().upper().endswith("OCB")
+            and _iso(fecha_oc)[:10] >= NOTA_ENTRADA_DESDE)
+
+
+def estado_visible(serie, estado, fecha_oc):
+    """Estado de la OC para mostrar: «Cerrado (nota de entrada)» en las OCB atendidas pendientes de factura."""
+    return TXT_NOTA_ENTRADA if con_nota_entrada(serie, estado, fecha_oc) else (estado or "")
 CERRADAS_AUTO = (SIT_FACTURADA, SIT_FUERA, SIT_CERRADA_SAP, SIT_CANCELADA_SAP)
 
 SCHEMA = """
@@ -109,7 +126,9 @@ def sincronizar(con, df, fecha_reporte, archivo):
 
     fact = df[df["N° Factura"] != ""].groupby("Numero OC")["N° Factura"].apply(lambda s: ", ".join(s))
     cab = df.drop_duplicates("Numero OC").set_index("Numero OC")
-    seguibles = [oc for oc in cab.index if oc not in fact.index and cab.loc[oc, "Estado"] not in ESTADOS_FINALES]
+    seguibles = [oc for oc in cab.index if oc not in fact.index and (
+        cab.loc[oc, "Estado"] not in ESTADOS_FINALES
+        or con_nota_entrada(cab.loc[oc, "Serie"], cab.loc[oc, "Estado"], cab.loc[oc, "Fecha"]))]
     existentes = {r["numero_oc"]: r for r in con.execute("SELECT * FROM ordenes")}
     res = {"omitida": False, "nuevas": 0, "facturadas": 0, "fuera": 0, "cerradas_sap": 0, "canceladas_sap": 0,
            "reabiertas": 0}
@@ -123,8 +142,10 @@ def sincronizar(con, df, fecha_reporte, archivo):
             con.execute("""INSERT INTO ordenes(numero_oc, serie, usuario, proveedor, ruc, mon, total, fecha_oc, estado_oc,
                            situacion, estado_seg, primer_visto, ultimo_visto) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (int(oc), *snap, SIT_ACTIVA, "Pendiente", rep, rep))
-            comentar(con, oc, f"Ingresa a seguimiento: OC sin factura (Estado OC: {c['Estado']}) en reporte {rep_txt}.",
-                     "Sistema", "sistema", fecha_ev)
+            nota = con_nota_entrada(c["Serie"], c["Estado"], c["Fecha"])
+            comentar(con, oc, f"Ingresa a seguimiento: OC sin factura (Estado OC: {c['Estado']}) en reporte {rep_txt}."
+                     + (" Es una OC de bienes cerrada con nota de entrada: se atendió completa y solo falta "
+                        "ingresar la factura." if nota else ""), "Sistema", "sistema", fecha_ev)
             res["nuevas"] += 1
             continue
         if prev["estado_oc"] != c["Estado"]:
@@ -139,7 +160,9 @@ def sincronizar(con, df, fecha_reporte, archivo):
                                   f"«Cerrar sin factura».", "Sistema", "sistema", fecha_ev)
             else:
                 situacion, cierre = SIT_ACTIVA, ""
-                comentar(con, oc, f"Vuelve a seguimiento: la OC aparece sin factura vigente en reporte {rep_txt}.",
+                nota = con_nota_entrada(c["Serie"], c["Estado"], c["Fecha"])
+                comentar(con, oc, f"Vuelve a seguimiento: la OC aparece sin factura vigente en reporte {rep_txt}."
+                         + (" Es una OC de bienes cerrada con nota de entrada: falta ingresar la factura." if nota else ""),
                          "Sistema", "sistema", fecha_ev)
                 res["reabiertas"] += 1
         con.execute("""UPDATE ordenes SET serie=?, usuario=?, proveedor=?, ruc=?, mon=?, total=?, fecha_oc=?, estado_oc=?,

@@ -45,6 +45,8 @@ def cumplimiento(sap, facturado):
         return "Cancelada", False
     if sap["estado"] != "Cerrado":
         return "En curso", False
+    if sgm.con_nota_entrada(sap.get("serie"), sap["estado"], sap.get("fecha")) and (pct is None or pct < 1 - TOLERANCIA):
+        return "Atendida, pendiente de factura", False        # nota de entrada: la factura aún no se ingresa
     if not facturado:
         return "Cerrada sin factura", True
     if pct is not None and pct >= 1 - TOLERANCIA:
@@ -91,7 +93,8 @@ def tablas(con, umbrales):
             "cumple": cumple, "evaluada": evaluada, "dias_fact": dias_fact,
             "completa": None if sap is None or not sap["total"] else
                         "Sí" if facturado >= sap["total"] * (1 - TOLERANCIA) else
-                        "No" if sap["estado"] in ("Cerrado", "Cancelado") else None,
+                        "No" if sap["estado"] in ("Cerrado", "Cancelado")
+                                and not sgm.con_nota_entrada(sap["serie"], sap["estado"], sap["fecha"]) else None,
             "plazo": sem.texto(sem.nivel_oc(o, umbrales)) if activa else ""}
         ordenes.append([
             x["oc"], x["comprador"], x["proveedor"], x["ruc"], fecha, _d(sap["aprobacion"]) if sap else None,

@@ -1,4 +1,4 @@
-﻿"""
+"""
 Genera las páginas del informe de Power BI (proyecto Seguimiento.pbip, formato PBIR).
 
     python generar_paginas.py
@@ -40,6 +40,7 @@ ACENTOS = ["#2563EB", "#0EA5A4", "#E11D48", "#F59E0B", "#7C3AED", "#16A34A", "#E
 COLORES_PLAZO = {"Atrasado": ROJO, "Atención": AMBAR, "En plazo": VERDE}
 COLORES_FACTURA = {"Vencida": ROJO, "Por vencer": AMBAR, "Al día": VERDE}
 COLORES_CATEGORIA = {"Pagada": VERDE, "Pendiente de pago": AMBAR, "En proceso sin factura": "#EA580C",
+                     "Pendiente de factura (nota de entrada)": "#0891B2",
                      "Pago parcial": "#60A5FA", "Cerrada sin factura": GRIS, "Cancelada sin factura": "#64748B",
                      "No está en el reporte": "#CBD5E1"}
 COLORES_CUMPLIMIENTO = {"Cumple": VERDE, "Cerrada con saldo sin facturar": AMBAR, "Cerrada sin factura": GRIS,

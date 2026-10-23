@@ -15,6 +15,7 @@ import seguimiento as sgm
 # Status corto -> categoría (para agrupar en gráficos: Power BI)
 CATEGORIAS = [("Pagada", "Pagada"), ("Pago parcial", "Pago parcial"), ("Facturada, pendiente", "Pendiente de pago"),
               ("En proceso, sin factura", "En proceso sin factura"), ("Sin factura · cerrada", "Cerrada sin factura"),
+              ("Atendida con nota de entrada", "Pendiente de factura (nota de entrada)"),
               ("Cerrada sin factura", "Cerrada sin factura"), ("Cancelada sin factura", "Cancelada sin factura"),
               ("No está", "No está en el reporte")]
 
@@ -64,7 +65,7 @@ def _resumen(x):
         "fecha": (sap or {}).get("fecha") or (o or {}).get("fecha_oc") or (fx[0]["fecha_oc"] if fx else "") or "",
         "mon": (sap or {}).get("mon") or (o or {}).get("mon") or (fx[0]["mon"] if fx else "") or r.get("moneda", ""),
         "total": (sap or {}).get("total") if sap else (o or {}).get("total"),
-        "estado_sap": sap["estado"] if sap else "No está en el último reporte",
+        "estado_sap": sgm.estado_visible(sap["serie"], sap["estado"], sap["fecha"]) if sap else "No está en el último reporte",
     }
     d["status"], d["nivel"] = status(x)
     d["categoria"] = next((c for p, c in CATEGORIAS if d["status"].startswith(p)), "Otro")
@@ -87,7 +88,10 @@ def status(x, hoy=None):
             return "No está en el último reporte SAP", "cerrada"
         return "No está en el reporte SAP (solo registrada en un requerimiento)", "atencion"
     estado = sap["estado"]
+    nota = sgm.con_nota_entrada(sap["serie"], estado, sap["fecha"])
     if not vigentes:
+        if nota:
+            return "Atendida con nota de entrada, pendiente de factura", "atencion"
         if estado == "Cancelado":
             return "Cancelada sin factura", "cerrada"
         if estado == "Cerrado":
@@ -101,13 +105,13 @@ def status(x, hoy=None):
     pct = facturado / sap["total"] * 100 if sap["total"] else None
     if not pendientes:
         pagos = [f["fecha_pago"] for f in vigentes if f["fecha_pago"]]
-        if estado == "Cerrado" or (pct is not None and pct >= 99.5):
+        if estado == "Cerrado" and not nota or (pct is not None and pct >= 99.5):
             return f"Pagada{' el ' + _fmt(max(pagos)) if pagos else ''}", "ok"
         return f"Pago parcial: facturas pagadas, OC facturada al {pct:.0f} %" if pct is not None else "Pago parcial", "pendiente"
     vencidas = [f for f in pendientes if f["vencimiento"] and f["vencimiento"] < hoy]
     txt = f"Facturada, pendiente de pago ({len(pendientes)} de {len(vigentes)} factura{'s' if len(vigentes) > 1 else ''}"
     txt += f", {len(vencidas)} vencida{'s' if len(vencidas) > 1 else ''})" if vencidas else ")"
-    if estado == "En proceso" and pct is not None and pct < 99.5:
+    if (estado == "En proceso" or nota) and pct is not None and pct < 99.5:
         txt += f" · OC facturada al {pct:.0f} %"
     return txt, "atencion" if vencidas else "pendiente"
 
@@ -120,7 +124,9 @@ def texto_status(x, fecha_reporte=None, comentarios=(), hoy=None):
     if sap:
         L.append(f"Comprador: {sap['usuario']} · Fecha OC: {_fmt(sap['fecha'])}"
                  + (f" · Aprobación: {_fmt(sap['aprobacion'])}" if sap["aprobacion"] else ""))
-        L.append(f"Total sin IGV: {_monto(sap['mon'], sap['total'])} · Estado en SAP: {sap['estado']}")
+        L.append(f"Total sin IGV: {_monto(sap['mon'], sap['total'])} · Estado en SAP: {sap['estado']}"
+                 + (" (OC de bienes con nota de entrada: se atendió completa, falta ingresar la factura)"
+                    if sgm.con_nota_entrada(sap["serie"], sap["estado"], sap["fecha"]) else ""))
     elif x["comprador"]:
         L.append(f"Comprador: {x['comprador']}")
     L += [f"STATUS: {x['status']}", ""]

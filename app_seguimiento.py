@@ -651,7 +651,8 @@ class App(tk.Tk):
                 f["numero_oc"], f["usuario"], f["proveedor"], f["n_factura"], f["tipo"], f["estado_factura"], f["mon"],
                 f"{f['ft_sin_imp'] or 0:,.2f}", f"{f['imp_pendiente'] or 0:,.2f}", fmt_fecha(f["emision"]),
                 fmt_fecha(f["vencimiento"]), "" if dv is None else dv, sem.TEXTO_FACT.get(f["nivel"], ""),
-                fmt_fecha(f["fecha_pago"]), f["estado_oc"], (f["ult_com"] or "").replace("\n", " ")))
+                fmt_fecha(f["fecha_pago"]), sgm.estado_visible(f["serie"], f["estado_oc"], f["fecha_oc"]),
+                (f["ult_com"] or "").replace("\n", " ")))
         u = sem.umbrales(self.cfg)
         vig = [f for f in self.facturas if f["situacion"] == sgm.FACT_VIGENTE]
         pend = [f for f in vig if f["estado_factura"] == "Pendiente de pago"]
@@ -777,7 +778,8 @@ class App(tk.Tk):
                     tags.append("vencido")
             self.tree.insert("", "end", iid=str(f["numero_oc"]), tags=tags, values=(
                 f["numero_oc"], f["usuario"], f["proveedor"], f["mon"], f"{f['total'] or 0:,.2f}", fmt_fecha(f["fecha_oc"]),
-                sgm.dias_desde(f["fecha_oc"]) or "", sem.texto(f["nivel"]), f["estado_oc"], f["situacion"], f["estado_seg"],
+                sgm.dias_desde(f["fecha_oc"]) or "", sem.texto(f["nivel"]),
+                sgm.estado_visible(f["serie"], f["estado_oc"], f["fecha_oc"]), f["situacion"], f["estado_seg"],
                 f["responsable"] or "", fmt_fecha(f["fecha_compromiso"]), (f["ult_com"] or "").replace("\n", " ")))
         activas = [f for f in self.filas if f["situacion"] == sgm.SIT_ACTIVA]
         sin_c = sum(1 for f in activas if not f["n_com"])
@@ -869,7 +871,7 @@ class App(tk.Tk):
                 return
             otras = [x for x in self.facturas if x["numero_oc"] == self.oc_sel]
             self.lbl_oc.config(text=f"OC {fx['numero_oc']} · {fx['proveedor']}")
-            lineas = [f"Serie {fx['serie']} · Comprador: {fx['usuario']} · Estado OC: {fx['estado_oc']}",
+            lineas = [f"Serie {fx['serie']} · Comprador: {fx['usuario']} · Estado OC: {sgm.estado_visible(fx['serie'], fx['estado_oc'], fx['fecha_oc'])}",
                       f"Fecha OC: {fmt_fecha(fx['fecha_oc'])} · RUC {fx['ruc']}", "",
                       f"Factura {fx['n_factura']} ({fx['tipo'] or 's/tipo'}): {fx['estado_factura'] or 'sin estado'}",
                       f"{fx['mon']} {fx['ft_sin_imp'] or 0:,.2f} sin imp. · pendiente {fx['imp_pendiente'] or 0:,.2f}",
@@ -895,7 +897,7 @@ class App(tk.Tk):
                 return
             self.lbl_oc.config(text=f"OC {f['numero_oc']} · {f['proveedor']}")
             info = (f"Serie {f['serie']} · Comprador: {f['usuario']}\n"
-                    f"Fecha OC: {fmt_fecha(f['fecha_oc'])} ({sgm.dias_desde(f['fecha_oc'])} días) · Estado OC: {f['estado_oc']}\n"
+                    f"Fecha OC: {fmt_fecha(f['fecha_oc'])} ({sgm.dias_desde(f['fecha_oc'])} días) · Estado OC: {sgm.estado_visible(f['serie'], f['estado_oc'], f['fecha_oc'])}\n"
                     f"Total sin IGV: {f['mon']} {f['total'] or 0:,.2f} · RUC {f['ruc']}\n"
                     f"Situación: {f['situacion']}" + (f" ({f['facturas']})" if f["facturas"] else "") +
                     f"\nEn seguimiento desde: {fmt_fecha(f['primer_visto'])}")
