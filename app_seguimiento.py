@@ -25,6 +25,7 @@ from datetime import datetime, date
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+import detalle_sap
 import powerbi as pbi
 import procesar_sap as ps
 import seguimiento as sgm
@@ -45,6 +46,7 @@ SITUACIONES = ["Activas", sgm.SIT_SIN_FACT, sgm.SIT_FACTURADA, sgm.SIT_CERRADA_S
 COLS = [("oc", "OC", 85, "e"), ("usuario", "Comprador", 120, "w"), ("proveedor", "Proveedor", 290, "w"),
         ("mon", "Mon", 45, "center"), ("total", "Total sin IGV", 100, "e"), ("fecha_oc", "Fecha OC", 80, "center"),
         ("dias", "Días", 50, "e"), ("plazo", "Plazo", 75, "center"), ("estado_oc", "Estado OC", 80, "w"),
+        ("logistica", "Logística", 150, "w"),
         ("situacion", "Situación", 110, "w"),
         ("estado_seg", "Seguimiento", 150, "w"), ("responsable", "Responsable", 110, "w"),
         ("compromiso", "Compromiso", 85, "center"), ("ult_com", "Último comentario", 330, "w")]
@@ -60,6 +62,18 @@ MONEDAS = ["Todas", "SOL", "USD", "CAD", "AUD", "GBP", "EUR", "ZAR"]
 
 def fmt_fecha(iso):
     return f"{iso[8:10]}/{iso[5:7]}/{iso[:4]}" if iso else ""
+
+
+def texto_logistica(f):
+    """Estado logístico de la OC (reporte de detalle), con la fecha de la última nota de entrada."""
+    if not f.get("logistica"):
+        return ""
+    txt = f["logistica"]
+    if f["logistica"] == "Ingreso parcial" and f.get("pct_ingresado") is not None:
+        txt += f" ({f['pct_ingresado']:.0%})"
+    if f.get("fecha_entrada") and f["logistica"] in ("Material ingresado", "Ingreso parcial"):
+        txt += f" · {fmt_fecha(f['fecha_entrada'])}"
+    return txt
 
 
 def usuario_windows():
@@ -185,9 +199,9 @@ def preparar_carga(ruta):
     return df, log, meta, fr, aviso
 
 
-def archivar(ruta, fr):
+def archivar(ruta, fr, nombre="Control de ordenes"):
     """Copia el reporte a Cargas\\ (historial). Si no se puede, devuelve la ruta original."""
-    archivo = os.path.join(CARGAS, f"Control de ordenes {fr:%Y-%m-%d %H%M}{os.path.splitext(ruta)[1]}")
+    archivo = os.path.join(CARGAS, f"{nombre} {fr:%Y-%m-%d %H%M}{os.path.splitext(ruta)[1]}")
     try:
         os.makedirs(CARGAS, exist_ok=True)
         if not (os.path.exists(archivo) and os.path.samefile(ruta, archivo)):
@@ -208,10 +222,11 @@ def aplicar_carga(ruta, df, log, meta, fr):
             respaldo_diario(con)
         except Exception:  # noqa: BLE001 — sin respaldo igual se carga; queda registrado
             registrar_error("Respaldo diario:\n" + traceback.format_exc())
-        res = sgm.sincronizar(con, df, fr, archivo)
+        doc = sgm.normalizar_documentos(df)        # DI sin número cuentan como factura (el control usa df tal cual)
+        res = sgm.sincronizar(con, doc, fr, archivo)
         if not res["omitida"]:
             rq.preparar(con)
-            rq.guardar_snapshot_sap(con, df)
+            rq.guardar_snapshot_sap(con, doc)
             res["req_completados"] = rq.completar_desde_sap(con)
             salida = generar_control(df, meta, log, con, fr)
             con.execute("UPDATE cargas SET salida=? WHERE id=(SELECT MAX(id) FROM cargas)", (salida,))
@@ -227,6 +242,38 @@ def aplicar_carga(ruta, df, log, meta, fr):
         cfg["ultimo_control"] = salida
         guardar_cfg(cfg)
     return res, salida, log
+
+
+def cargar_detalle(ruta):
+    """Reporte de detalle (OC → entrada → factura → pago): lo archiva y reemplaza el detalle guardado."""
+    df = detalle_sap.leer(ruta)
+    archivo = archivar(ruta, datetime.fromtimestamp(os.path.getmtime(ruta)), "Seguimiento detalle")
+    con = sgm.conectar(DB)
+    try:
+        rq.preparar(con)
+        return detalle_sap.guardar(con, df, archivo)
+    finally:
+        con.close()
+
+
+def reaplicar_control():
+    """Vuelve a aplicar el último «Control de órdenes» (p. ej. tras cargar solo el detalle), para que el seguimiento
+    use el estado logístico nuevo. Devuelve (resultado, ruta_control, log) o None si no hay un Control cargado."""
+    con = sgm.conectar(DB)
+    try:
+        u = sgm.ultima_carga(con)
+    finally:
+        con.close()
+    if not u or not u["archivo"] or not os.path.exists(u["archivo"]):
+        return None
+    df, log, meta, _ = ps.procesar(u["archivo"])
+    return aplicar_carga(u["archivo"], df, log, meta, fecha_de(meta, u["archivo"]))
+
+
+def separar_reportes(rutas):
+    """(rutas de detalle, rutas de Control) según el contenido de cada archivo."""
+    detalle = [r for r in rutas if detalle_sap.es_detalle(r)]
+    return detalle, [r for r in rutas if r not in detalle]
 
 
 def cargar_reporte(ruta, forzar=False):
@@ -383,6 +430,8 @@ class App(tk.Tk):
         ttk.Checkbutton(filt2, text="Solo sin comentarios", variable=self.v_sincom, command=self.pintar).pack(side="left")
         self.v_venc = tk.BooleanVar()
         ttk.Checkbutton(filt2, text="Solo compromiso vencido", variable=self.v_venc, command=self.pintar).pack(side="left", padx=10)
+        self.v_logistica = self._combo(filt2, "Logística:", ["Todos"] + detalle_sap.LOGISTICA[:3] + [
+            detalle_sap.SERVICIO, detalle_sap.SIN_DETALLE], 18)
         ttk.Button(filt2, text="Limpiar filtros", command=self.limpiar_filtros).pack(side="left", padx=(0, 16))
         self.lbl_resumen = ttk.Label(filt2, foreground="#404040", justify="left")
         self.lbl_resumen.pack(side="left")
@@ -574,7 +623,8 @@ class App(tk.Tk):
         if u:
             self.lbl_estado.config(text=f"Última carga: reporte SAP del {fmt_fecha(u['fecha_reporte'])} {u['fecha_reporte'][11:16]}"
                                         f" · cargado el {fmt_fecha(u['fecha_carga'])} {u['fecha_carga'][11:16]}"
-                                        f" · {u['nuevas']} nuevas, {u['facturadas']} facturadas, {u['fuera']} fuera del reporte en esa carga")
+                                        f" · {u['nuevas']} nuevas, {u['facturadas']} facturadas, {u['fuera']} fuera del reporte en esa carga"
+                                        + self._texto_detalle())
         else:
             self.lbl_estado.config(text="Aún no se ha cargado ningún reporte. Usa «Cargar CSV de SAP…».")
         self.facturas = sgm.listar_facturas(self.con)
@@ -587,6 +637,12 @@ class App(tk.Tk):
             ui_con.mostrar_status(self, self.con_oc)
         if self.oc_sel and self.modo in ("oc", "fac", "con"):
             self.mostrar_detalle()        # el panel refleja lo que acaba de cambiar (p. ej. tras una carga)
+
+    def _texto_detalle(self):
+        d = detalle_sap.ultima_carga(self.con)
+        if d is None:
+            return "   |   Reporte de detalle: aún no cargado"
+        return f"   |   Detalle (ingresos y líneas): archivo del {fmt_fecha(d['fecha_archivo'])} {d['fecha_archivo'][11:16]}"
 
     def refrescar_req(self):
         ui_req.refrescar(self)
@@ -648,10 +704,11 @@ class App(tk.Tk):
                 tags.append(f["nivel"])
             dv = self._dias_venc(f)
             t.insert("", "end", iid=f"{f['ruc']}|{f['n_factura']}", tags=tags, values=(
-                f["numero_oc"], f["usuario"], f["proveedor"], f["n_factura"], f["tipo"], f["estado_factura"], f["mon"],
+                f["numero_oc"], f["usuario"], f["proveedor"], f["n_factura"], f["tipo"],
+                "Pago parcial" if f["estado_detalle"] == "Pago parcial" else f["estado_factura"], f["mon"],
                 f"{f['ft_sin_imp'] or 0:,.2f}", f"{f['imp_pendiente'] or 0:,.2f}", fmt_fecha(f["emision"]),
                 fmt_fecha(f["vencimiento"]), "" if dv is None else dv, sem.TEXTO_FACT.get(f["nivel"], ""),
-                fmt_fecha(f["fecha_pago"]), sgm.estado_visible(f["serie"], f["estado_oc"], f["fecha_oc"]),
+                fmt_fecha(f["fecha_pago"]), sgm.estado_visible(f["serie"], f["estado_oc"], f["fecha_oc"], f["ingresado"]),
                 (f["ult_com"] or "").replace("\n", " ")))
         u = sem.umbrales(self.cfg)
         vig = [f for f in self.facturas if f["situacion"] == sgm.FACT_VIGENTE]
@@ -744,6 +801,9 @@ class App(tk.Tk):
                 continue
             if self.v_sincom.get() and f["n_com"]:
                 continue
+            logi = self.v_logistica.get()
+            if logi != "Todos" and (f["logistica"] or detalle_sap.SIN_DETALLE) != logi:
+                continue
             if self.v_venc.get() and not (f["fecha_compromiso"] and f["fecha_compromiso"] < hoy):
                 continue
             if q and q not in " ".join(str(f[k] or "") for k in ("numero_oc", "proveedor", "ruc", "usuario", "responsable", "ult_com")).lower():
@@ -779,7 +839,8 @@ class App(tk.Tk):
             self.tree.insert("", "end", iid=str(f["numero_oc"]), tags=tags, values=(
                 f["numero_oc"], f["usuario"], f["proveedor"], f["mon"], f"{f['total'] or 0:,.2f}", fmt_fecha(f["fecha_oc"]),
                 sgm.dias_desde(f["fecha_oc"]) or "", sem.texto(f["nivel"]),
-                sgm.estado_visible(f["serie"], f["estado_oc"], f["fecha_oc"]), f["situacion"], f["estado_seg"],
+                sgm.estado_visible(f["serie"], f["estado_oc"], f["fecha_oc"], f["ingresado"]), texto_logistica(f),
+                f["situacion"], f["estado_seg"],
                 f["responsable"] or "", fmt_fecha(f["fecha_compromiso"]), (f["ult_com"] or "").replace("\n", " ")))
         activas = [f for f in self.filas if f["situacion"] == sgm.SIT_ACTIVA]
         sin_c = sum(1 for f in activas if not f["n_com"])
@@ -817,6 +878,7 @@ class App(tk.Tk):
         self.v_comprador.set(self.mio())
         self.v_estado_oc.set("Todos")
         self.v_situacion.set("Activas")
+        self.v_logistica.set("Todos")
         self.v_sincom.set(False)
         self.v_venc.set(False)
         self.pintar()
@@ -871,7 +933,7 @@ class App(tk.Tk):
                 return
             otras = [x for x in self.facturas if x["numero_oc"] == self.oc_sel]
             self.lbl_oc.config(text=f"OC {fx['numero_oc']} · {fx['proveedor']}")
-            lineas = [f"Serie {fx['serie']} · Comprador: {fx['usuario']} · Estado OC: {sgm.estado_visible(fx['serie'], fx['estado_oc'], fx['fecha_oc'])}",
+            lineas = [f"Serie {fx['serie']} · Comprador: {fx['usuario']} · Estado OC: {sgm.estado_visible(fx['serie'], fx['estado_oc'], fx['fecha_oc'], fx['ingresado'])}",
                       f"Fecha OC: {fmt_fecha(fx['fecha_oc'])} · RUC {fx['ruc']}", "",
                       f"Factura {fx['n_factura']} ({fx['tipo'] or 's/tipo'}): {fx['estado_factura'] or 'sin estado'}",
                       f"{fx['mon']} {fx['ft_sin_imp'] or 0:,.2f} sin imp. · pendiente {fx['imp_pendiente'] or 0:,.2f}",
@@ -897,7 +959,8 @@ class App(tk.Tk):
                 return
             self.lbl_oc.config(text=f"OC {f['numero_oc']} · {f['proveedor']}")
             info = (f"Serie {f['serie']} · Comprador: {f['usuario']}\n"
-                    f"Fecha OC: {fmt_fecha(f['fecha_oc'])} ({sgm.dias_desde(f['fecha_oc'])} días) · Estado OC: {sgm.estado_visible(f['serie'], f['estado_oc'], f['fecha_oc'])}\n"
+                    f"Fecha OC: {fmt_fecha(f['fecha_oc'])} ({sgm.dias_desde(f['fecha_oc'])} días) · Estado OC: {sgm.estado_visible(f['serie'], f['estado_oc'], f['fecha_oc'], f['ingresado'])}\n"
+                    f"Logística: {texto_logistica(f) or 'sin datos del reporte de detalle'}\n"
                     f"Total sin IGV: {f['mon']} {f['total'] or 0:,.2f} · RUC {f['ruc']}\n"
                     f"Situación: {f['situacion']}" + (f" ({f['facturas']})" if f["facturas"] else "") +
                     f"\nEn seguimiento desde: {fmt_fecha(f['primer_visto'])}")
@@ -1202,13 +1265,40 @@ class App(tk.Tk):
     def cargar_csv(self):
         self._guardar_pendientes()
         inicial = self.cfg.get("ultimo_csv") or os.path.join(BASE, "Control de ordenes.csv")
-        ruta = filedialog.askopenfilename(parent=self, title="Reporte 'Control de órdenes' descargado de SAP",
-                                          initialdir=os.path.dirname(inicial), initialfile=os.path.basename(inicial),
-                                          filetypes=[("Reporte SAP", "*.csv *.xlsx"), ("Todos", "*.*")])
-        if not ruta:
+        rutas = filedialog.askopenfilenames(
+            parent=self, title="Reportes de SAP: «Control de órdenes» y/o el de detalle (puedes elegir los dos con Ctrl)",
+            initialdir=os.path.dirname(inicial), filetypes=[("Reportes SAP", "*.csv *.xlsx"), ("Todos", "*.*")])
+        if not rutas:
             return
-        self.cfg["ultimo_csv"] = ruta
-        guardar_cfg(self.cfg)
+        detalle, control = separar_reportes(list(rutas))
+        if len(control) > 1 or len(detalle) > 1:
+            messagebox.showwarning("Cargar", "Elige como máximo un «Control de órdenes» y un reporte de detalle.", parent=self)
+            return
+        if control:
+            self.cfg["ultimo_csv"] = control[0]
+            guardar_cfg(self.cfg)
+        if detalle:
+            def tras_detalle(r):
+                texto = (f"Reporte de detalle cargado: {r['ocs']} OC aprobadas, {r['lineas']} líneas, "
+                         f"{r['entradas']} notas de entrada y {r['facturas']} facturas.")
+                if control:
+                    self.refrescar()
+                    self._cargar_control(control[0], previo=texto)
+                    return
+
+                def fin_solo(r2):
+                    self.refrescar()
+                    extra = ("\n\nSe volvió a aplicar el último «Control de órdenes» con el estado logístico nuevo "
+                             f"({r2[0].get('nuevas', 0)} OC entraron al seguimiento)." if r2 else
+                             "\n\nAún no hay un «Control de órdenes» cargado: cárgalo para actualizar el seguimiento.")
+                    messagebox.showinfo("Carga completada", texto + extra, parent=self)
+                self._en_segundo_plano("Actualizando el seguimiento con el detalle", reaplicar_control, fin_solo)
+            self._en_segundo_plano("Leyendo el reporte de detalle", lambda: cargar_detalle(detalle[0]), tras_detalle)
+        else:
+            self._cargar_control(control[0])
+
+    def _cargar_control(self, ruta, previo=""):
+        """Carga del «Control de órdenes»: revisión de reporte completo, sincronización y control del día."""
 
         def paso2(datos):
             df, log, meta, fr, aviso = datos
@@ -1237,6 +1327,8 @@ class App(tk.Tk):
                         f"Facturas: {res.get('facturas_nuevas', 0)} nuevas · {res.get('facturas_pagadas', 0)} pagadas desde la carga anterior\n"
                         f"Requerimientos completados con datos de SAP: {res.get('req_completados', 0)}")
             self.refrescar()
+            if previo:
+                msg = previo + "\n\n" + msg
             if salida is None:
                 messagebox.showwarning("Reporte no aplicado", msg, parent=self)
             elif messagebox.askyesno("Carga completada", msg + "\n\n¿Abrir el control en Excel?", parent=self):
@@ -1279,15 +1371,25 @@ class App(tk.Tk):
 
 def main():
     # Modo sin ventana (p. ej. desde el Programador de tareas):
-    #   "Seguimiento Ordenes.exe" --cargar archivo.csv [--forzar]
+    #   "Seguimiento Ordenes.exe" --cargar "Control de ordenes.csv" ["Seguimiento.xlsx"] [--forzar]
+    # Acepta el «Control de órdenes», el reporte de detalle o los dos (el detalle se carga primero).
     # --forzar aplica también un reporte que parece incompleto (sin --forzar se deja para revisarlo en la app).
     if len(sys.argv) >= 3 and sys.argv[1] == "--cargar":
         ahora = f"{datetime.now():%d/%m/%Y %H:%M}"
+        detalle, control = separar_reportes([a for a in sys.argv[2:] if not a.startswith("--")])
         with open(os.path.join(BASE, "ultima_carga.log"), "w", encoding="utf-8") as fh:
             try:
-                res, salida, log = cargar_reporte(sys.argv[2], forzar="--forzar" in sys.argv[3:])
+                det = [cargar_detalle(d) for d in detalle]
+                if not control:
+                    r = reaplicar_control()
+                    fh.write(f"{ahora} OK (solo detalle; se reaplicó el último Control: {r[0] if r else 'no hay'})\n"
+                             f"Detalle: {det}\n")
+                    return
+                res, salida, log = cargar_reporte(control[0], forzar="--forzar" in sys.argv)
                 estado = f"OMITIDO: {res['motivo']}" if res["omitida"] else "OK"
                 fh.write(f"{ahora} {estado}\nControl: {salida or '(no se generó)'}\nSeguimiento: {res}\n")
+                if det:
+                    fh.write(f"Detalle: {det}\n")
                 for c, v in log["conteos"]:
                     fh.write(f"  {c}: {v}\n")
             except ReporteIncompleto as e:

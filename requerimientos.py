@@ -18,6 +18,7 @@ from datetime import date, datetime, timedelta
 
 import pandas as pd
 
+import detalle_sap
 import seguimiento as sgm
 
 # Campos de un requerimiento: (columna en la base, encabezado en el Excel CONTROL, tipo)
@@ -135,6 +136,8 @@ def preparar(con):
     _agregar_columna(con, "sap_fact", "monto", "REAL")               # FT Sin Imp. de cada factura
     _agregar_columna(con, "req", "manual", "TEXT DEFAULT '[]'")      # campos que el usuario vació a propósito
     _agregar_columna(con, "sap_oc", "serie", "TEXT DEFAULT ''")      # OCB/OCS: excepción de nota de entrada
+    for col, tipo in (("tipo_oc", "TEXT"), ("estado_logistico", "TEXT"), ("ingresado", "INTEGER"), ("fecha_entrada", "TEXT")):
+        _agregar_columna(con, "sap_oc", col, tipo)                   # del reporte de detalle (detalle_sap.enlazar)
     _agregar_columna(con, "req", "monto_ref", "REAL")
     _agregar_columna(con, "req", "tipo_ref", "TEXT DEFAULT ''")
     _agregar_columna(con, "req", "f_conformidad", "TEXT DEFAULT ''")
@@ -335,6 +338,7 @@ def guardar_snapshot_sap(con, df):
                     "VALUES (?,?,?,?,?,?,?,?,?,?)", [
         (int(r["Numero OC"]), _iso(r["Fecha"]), _iso(r["Aprobación"]), r["Usuario"], r["Proveedor"], r["RUC"],
          MON_SAP.get(r["Mon"], r["Mon"]), _num(r["Total Sin IGV"]), r["Estado"], r["Serie"]) for _, r in cab.iterrows()])
+    detalle_sap.enlazar(con)               # estado logístico del último reporte de detalle
     con.execute("DELETE FROM sap_fact")
     fx = df[df["N° Factura"] != ""]
     con.executemany("INSERT INTO sap_fact(numero_oc, n_factura, estado, contab, emision, fecha_pago, monto) "
@@ -352,10 +356,14 @@ def datos_sap(con, orden):
     if oc is None:
         return None
     fac = [dict(r) for r in con.execute("SELECT * FROM sap_fact WHERE numero_oc=? ORDER BY contab", (int(orden),))]
-    nota = sgm.con_nota_entrada(oc["serie"], oc["estado"], oc["fecha"])
+    nota = sgm.con_nota_entrada(oc["serie"], oc["estado"], oc["fecha"], oc["ingresado"])
     d = {"emision_oc": oc["fecha"], "aprob_oc": oc["aprobacion"], "proveedor": oc["proveedor"],
-         "monto": oc["total"], "moneda": oc["mon"], "estado_oc": sgm.estado_visible(oc["serie"], oc["estado"], oc["fecha"]),
-         "facturas": fac, "sin_pago": ""}
+         "monto": oc["total"], "moneda": oc["mon"],
+         "estado_oc": sgm.estado_visible(oc["serie"], oc["estado"], oc["fecha"], oc["ingresado"]),
+         "facturas": fac, "sin_pago": "", "logistica": oc["estado_logistico"] or "", "fecha_entrada": oc["fecha_entrada"] or ""}
+    # Bienes recibidos por completo: la fecha de la última nota de entrada es la conformidad (entrega real, OTIF)
+    if oc["estado_logistico"] == "Material ingresado" and oc["fecha_entrada"]:
+        d["f_conformidad"] = oc["fecha_entrada"]
     if fac:
         d["num_factura"] = ", ".join(f["n_factura"] for f in fac)
         contab = [f["contab"] for f in fac if f["contab"]]
@@ -385,7 +393,8 @@ def usos_oc(con):
 
 # Campos que aporta SAP. Los que vinieron de SAP se mantienen al día; los escritos por el usuario no se tocan;
 # los vacíos se completan (salvo que el usuario los haya vaciado a propósito).
-CAMPOS_SAP = ["emision_oc", "aprob_oc", "proveedor", "monto", "moneda", "num_factura", "recepcion_fact", "fecha_pago"]
+CAMPOS_SAP = ["emision_oc", "aprob_oc", "proveedor", "monto", "moneda", "num_factura", "recepcion_fact", "fecha_pago",
+              "f_conformidad"]
 # Vinculados: si la orden está en SAP, SAP manda siempre (lo aprobado en SAP es lo correcto).
 # Excepción: el monto de una OC que comparten varios requerimientos (el total SAP es de la orden completa).
 CAMPOS_VINCULADOS = ["monto", "moneda"]
@@ -434,7 +443,8 @@ def completar_desde_sap(con, req_id=None, autor="Sistema"):
             vals = [("" if v is None and k != "monto" else v) for k, v in cambios.items()]
             con.execute(f"UPDATE req SET {sets}desde_sap=?, modificado=? WHERE id=?",
                         [*vals, json.dumps(sorted(desde)), _ahora(), r["id"]])
-        ver = lambda k, v: "(vacío)" if v in (None, "") else fmt(v) if k in CAMPOS_FECHA else (f"{v:,.2f}" if k == "monto" else v)
+        ver = lambda k, v: "(vacío)" if v in (None, "") else fmt(v) if k in CAMPOS_FECHA or k == "f_conformidad" else (
+            f"{v:,.2f}" if k == "monto" else v)
         if llenados:
             det = "; ".join(f"{ETIQUETAS[k]}: {ver(k, v)}" for k, v in llenados.items())
             evento(con, r["id"], f"Completado desde SAP (OC {r['orden']}): {det}", autor, "sistema")
@@ -564,8 +574,8 @@ def etapa(r):
 def listar(con):
     proys = {r["codigo"]: dict(r) for r in con.execute("SELECT * FROM cat_proyectos")}
     sap = {r["numero_oc"]: r["estado"] for r in con.execute("SELECT numero_oc, estado FROM sap_oc")}
-    nota_entrada = {r["numero_oc"] for r in con.execute("SELECT numero_oc, serie, estado, fecha FROM sap_oc")
-                    if sgm.con_nota_entrada(r["serie"], r["estado"], r["fecha"])}
+    nota_entrada = {r["numero_oc"] for r in con.execute("SELECT numero_oc, serie, estado, fecha, ingresado FROM sap_oc")
+                    if sgm.con_nota_entrada(r["serie"], r["estado"], r["fecha"], r["ingresado"])}
     n_fact = dict(con.execute("SELECT numero_oc, COUNT(*) FROM sap_fact GROUP BY numero_oc").fetchall())
     # Último comentario de usuario de cada OC (pestañas de seguimiento de OC y facturas)
     com = {}

@@ -4,8 +4,8 @@ Base de seguimiento de órdenes sin factura (SQLite).
 Cada carga de un reporte SAP sincroniza la base:
 - OC sin ninguna factura vigente y que NO está Cerrada ni Cancelada -> entra (o sigue) en seguimiento.
   (Una OC Cerrada o Cancelada sin factura ya no se va a facturar: no se trata.)
-  Excepción: una OC de bienes (serie OCB) «Cerrada» desde NOTA_ENTRADA_DESDE tiene nota de entrada: se atendió
-  completa y solo falta ingresar la factura, así que sí se sigue.
+  Excepción: una OC «Cerrada» con material ingresado (nota de entrada, según el reporte de detalle) se atendió
+  y solo falta ingresar la factura, así que sí se sigue. Sin detalle se usa la regla por serie y fecha.
 - OC en seguimiento que ya tiene factura -> se cierra como "Facturada" (queda el historial).
 - OC en seguimiento que pasa a Cerrada/Cancelada sin factura -> se cierra como "OC cerrada/cancelada sin factura".
 - OC en seguimiento que ya no aparece en el reporte -> se cierra como "Fuera del reporte".
@@ -26,21 +26,26 @@ SIT_CERRADA_SAP = "OC cerrada sin factura"     # la OC se cerró en SAP sin fact
 SIT_CANCELADA_SAP = "OC cancelada sin factura"  # la OC se canceló en SAP sin facturar
 # Estado de la OC en SAP que la saca del seguimiento -> situación con la que se cierra
 ESTADOS_FINALES = {"Cerrado": SIT_CERRADA_SAP, "Cancelado": SIT_CANCELADA_SAP}
-# Desde esta fecha de OC, en las OC de bienes (serie OCB / 26OCB) «Cerrado» significa que ya tienen nota de entrada
-# (atendidas en su totalidad) y solo falta la factura: no es un cierre sin factura.
+# Una OC «Cerrado» con nota de entrada (material ingresado) ya se atendió y solo falta la factura: no es un cierre
+# sin factura. El dato real viene del reporte de detalle (detalle_oc.ingresado). Si la OC aún no está en el detalle,
+# se usa la regla de respaldo: OC de bienes (serie OCB / 26OCB) con fecha desde NOTA_ENTRADA_DESDE.
 NOTA_ENTRADA_DESDE = "2026-09-01"
 TXT_NOTA_ENTRADA = "Cerrado (nota de entrada)"
 
 
-def con_nota_entrada(serie, estado, fecha_oc):
-    """¿OC de bienes cerrada con nota de entrada (pendiente de factura, no cerrada sin factura)?"""
-    return (estado == "Cerrado" and str(serie or "").strip().upper().endswith("OCB")
-            and _iso(fecha_oc)[:10] >= NOTA_ENTRADA_DESDE)
+def con_nota_entrada(serie, estado, fecha_oc, ingresado=None):
+    """¿OC cerrada con nota de entrada (pendiente de factura, no cerrada sin factura)?
+    `ingresado`: 1/0 según el reporte de detalle; None = servicio o sin detalle (se aplica la regla de respaldo)."""
+    if estado != "Cerrado":
+        return False
+    if ingresado is not None:
+        return bool(ingresado)
+    return str(serie or "").strip().upper().endswith("OCB") and _iso(fecha_oc)[:10] >= NOTA_ENTRADA_DESDE
 
 
-def estado_visible(serie, estado, fecha_oc):
-    """Estado de la OC para mostrar: «Cerrado (nota de entrada)» en las OCB atendidas pendientes de factura."""
-    return TXT_NOTA_ENTRADA if con_nota_entrada(serie, estado, fecha_oc) else (estado or "")
+def estado_visible(serie, estado, fecha_oc, ingresado=None):
+    """Estado de la OC para mostrar: «Cerrado (nota de entrada)» en las atendidas pendientes de factura."""
+    return TXT_NOTA_ENTRADA if con_nota_entrada(serie, estado, fecha_oc, ingresado) else (estado or "")
 CERRADAS_AUTO = (SIT_FACTURADA, SIT_FUERA, SIT_CERRADA_SAP, SIT_CANCELADA_SAP)
 
 SCHEMA = """
@@ -70,6 +75,26 @@ CREATE TABLE IF NOT EXISTS facturas (
     PRIMARY KEY (ruc, n_factura)
 );
 CREATE INDEX IF NOT EXISTS ix_fact_oc ON facturas(numero_oc);
+CREATE TABLE IF NOT EXISTS detalle_lineas (
+    numero_oc INTEGER, linea INTEGER, tipo_oc TEXT, codigo TEXT, descripcion TEXT, cantidad REAL, um TEXT,
+    total_linea REAL, moneda TEXT, proyecto TEXT, unidad_negocio TEXT, area TEXT, ingresado REAL,
+    pendiente_ingreso REAL, estado_logistico TEXT, fecha_entrada TEXT, PRIMARY KEY (numero_oc, linea)
+);
+CREATE TABLE IF NOT EXISTS detalle_entradas (
+    numero_oc INTEGER, linea INTEGER, n_entrada TEXT, fecha TEXT, cantidad REAL, almacen TEXT
+);
+CREATE TABLE IF NOT EXISTS detalle_facturas (
+    n_interno TEXT, numero_oc INTEGER, n_factura TEXT, tipo TEXT, estado TEXT, emision TEXT, contab TEXT,
+    vencimiento TEXT, fecha_pago TEXT, imp_pendiente REAL, ruc TEXT, PRIMARY KEY (n_interno, numero_oc)
+);
+CREATE INDEX IF NOT EXISTS ix_det_fact_oc ON detalle_facturas(numero_oc);
+CREATE TABLE IF NOT EXISTS detalle_oc (
+    numero_oc INTEGER PRIMARY KEY, tipo_oc TEXT, estado_logistico TEXT, ingresado INTEGER, fecha_entrada TEXT,
+    pct_ingresado REAL, proyecto TEXT, unidad_negocio TEXT, area TEXT, n_lineas INTEGER
+);
+CREATE TABLE IF NOT EXISTS detalle_cargas (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, archivo TEXT, fecha_archivo TEXT, fecha_carga TEXT, filas INTEGER, ocs INTEGER
+);
 CREATE TABLE IF NOT EXISTS cargas (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     fecha_reporte TEXT, archivo TEXT, fecha_carga TEXT, salida TEXT,
@@ -114,6 +139,16 @@ def ultima_carga(con):
     return con.execute("SELECT * FROM cargas ORDER BY fecha_reporte DESC, id DESC LIMIT 1").fetchone()
 
 
+def normalizar_documentos(df):
+    """Documentos de compra sin N° de factura (p. ej. DI, documento interno, ya pagado) cuentan como factura:
+    se les pone un número visible para que la OC no parezca «sin factura». Devuelve una copia."""
+    df = df.copy()
+    sin_numero = (df["N° Factura"] == "") & (df["Tipo"] != "")
+    df.loc[sin_numero, "N° Factura"] = df.loc[sin_numero].apply(
+        lambda r: f"{r['Tipo']} s/n (OC {r['Numero OC']})", axis=1)
+    return df
+
+
 def sincronizar(con, df, fecha_reporte, archivo):
     """Actualiza la base con el reporte limpio `df` (salida de procesar_sap.limpiar)."""
     rep = fecha_reporte.strftime("%Y-%m-%d %H:%M:%S")
@@ -126,9 +161,11 @@ def sincronizar(con, df, fecha_reporte, archivo):
 
     fact = df[df["N° Factura"] != ""].groupby("Numero OC")["N° Factura"].apply(lambda s: ", ".join(s))
     cab = df.drop_duplicates("Numero OC").set_index("Numero OC")
+    ing = dict(con.execute("SELECT numero_oc, ingresado FROM detalle_oc").fetchall())    # reporte de detalle
+    nota_de = lambda oc: con_nota_entrada(cab.loc[oc, "Serie"], cab.loc[oc, "Estado"], cab.loc[oc, "Fecha"],
+                                          ing.get(int(oc)))
     seguibles = [oc for oc in cab.index if oc not in fact.index and (
-        cab.loc[oc, "Estado"] not in ESTADOS_FINALES
-        or con_nota_entrada(cab.loc[oc, "Serie"], cab.loc[oc, "Estado"], cab.loc[oc, "Fecha"]))]
+        cab.loc[oc, "Estado"] not in ESTADOS_FINALES or nota_de(oc))]
     existentes = {r["numero_oc"]: r for r in con.execute("SELECT * FROM ordenes")}
     res = {"omitida": False, "nuevas": 0, "facturadas": 0, "fuera": 0, "cerradas_sap": 0, "canceladas_sap": 0,
            "reabiertas": 0}
@@ -142,10 +179,9 @@ def sincronizar(con, df, fecha_reporte, archivo):
             con.execute("""INSERT INTO ordenes(numero_oc, serie, usuario, proveedor, ruc, mon, total, fecha_oc, estado_oc,
                            situacion, estado_seg, primer_visto, ultimo_visto) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                         (int(oc), *snap, SIT_ACTIVA, "Pendiente", rep, rep))
-            nota = con_nota_entrada(c["Serie"], c["Estado"], c["Fecha"])
             comentar(con, oc, f"Ingresa a seguimiento: OC sin factura (Estado OC: {c['Estado']}) en reporte {rep_txt}."
-                     + (" Es una OC de bienes cerrada con nota de entrada: se atendió completa y solo falta "
-                        "ingresar la factura." if nota else ""), "Sistema", "sistema", fecha_ev)
+                     + (" Está cerrada con nota de entrada (material ingresado): solo falta ingresar la factura."
+                        if nota_de(oc) else ""), "Sistema", "sistema", fecha_ev)
             res["nuevas"] += 1
             continue
         if prev["estado_oc"] != c["Estado"]:
@@ -160,10 +196,9 @@ def sincronizar(con, df, fecha_reporte, archivo):
                                   f"«Cerrar sin factura».", "Sistema", "sistema", fecha_ev)
             else:
                 situacion, cierre = SIT_ACTIVA, ""
-                nota = con_nota_entrada(c["Serie"], c["Estado"], c["Fecha"])
                 comentar(con, oc, f"Vuelve a seguimiento: la OC aparece sin factura vigente en reporte {rep_txt}."
-                         + (" Es una OC de bienes cerrada con nota de entrada: falta ingresar la factura." if nota else ""),
-                         "Sistema", "sistema", fecha_ev)
+                         + (" Está cerrada con nota de entrada (material ingresado): falta ingresar la factura."
+                            if nota_de(oc) else ""), "Sistema", "sistema", fecha_ev)
                 res["reabiertas"] += 1
         con.execute("""UPDATE ordenes SET serie=?, usuario=?, proveedor=?, ruc=?, mon=?, total=?, fecha_oc=?, estado_oc=?,
                        situacion=?, fecha_cierre=?, facturas='', ultimo_visto=? WHERE numero_oc=?""",
@@ -200,8 +235,9 @@ def sincronizar(con, df, fecha_reporte, archivo):
             con.execute("UPDATE ordenes SET situacion=?, estado_oc=?, fecha_cierre=?, ultimo_visto=? WHERE numero_oc=?",
                         (ESTADOS_FINALES[estado], estado, rep, rep, oc))
             verbo = "se cerró" if estado == "Cerrado" else "se canceló"
-            comentar(con, oc, f"La OC {verbo} en SAP sin factura (reporte {rep_txt}): ya no se facturará. Seguimiento cerrado.",
-                     "Sistema", "sistema", fecha_ev)
+            sin_ingreso = " sin ingreso de material" if estado == "Cerrado" and ing.get(int(oc)) == 0 else ""
+            comentar(con, oc, f"La OC {verbo} en SAP sin factura{sin_ingreso} (reporte {rep_txt}): ya no se facturará. "
+                              f"Seguimiento cerrado.", "Sistema", "sistema", fecha_ev)
             res["cerradas_sap" if estado == "Cerrado" else "canceladas_sap"] += 1
 
     _sincronizar_facturas(con, df, rep, rep_txt, fecha_ev, recien_facturadas, res)
@@ -271,6 +307,9 @@ def _sincronizar_facturas(con, df, rep, rep_txt, fecha_ev, recien_facturadas, re
 
 def listar_facturas(con):
     q = """SELECT f.*,
+             (SELECT ingresado FROM detalle_oc d WHERE d.numero_oc=f.numero_oc) AS ingresado,
+             (SELECT df.estado FROM detalle_facturas df WHERE df.numero_oc=f.numero_oc AND df.n_factura=f.n_factura
+                AND df.estado<>'Anulado' LIMIT 1) AS estado_detalle,
              (SELECT texto FROM comentarios c WHERE c.numero_oc=f.numero_oc AND c.tipo='usuario' ORDER BY fecha DESC, id DESC LIMIT 1) AS ult_com,
              (SELECT fecha FROM comentarios c WHERE c.numero_oc=f.numero_oc AND c.tipo='usuario' ORDER BY fecha DESC, id DESC LIMIT 1) AS ult_fecha,
              (SELECT COUNT(*) FROM comentarios c WHERE c.numero_oc=f.numero_oc AND c.tipo='usuario') AS n_com
@@ -315,11 +354,11 @@ def actualizar_orden(con, oc, estado_seg, responsable, fecha_compromiso, autor):
 
 
 def listar(con):
-    q = """SELECT o.*,
+    q = """SELECT o.*, d.ingresado, d.estado_logistico AS logistica, d.fecha_entrada, d.tipo_oc, d.pct_ingresado,
              (SELECT texto FROM comentarios c WHERE c.numero_oc=o.numero_oc AND c.tipo='usuario' ORDER BY fecha DESC, id DESC LIMIT 1) AS ult_com,
              (SELECT fecha FROM comentarios c WHERE c.numero_oc=o.numero_oc AND c.tipo='usuario' ORDER BY fecha DESC, id DESC LIMIT 1) AS ult_fecha,
              (SELECT COUNT(*) FROM comentarios c WHERE c.numero_oc=o.numero_oc AND c.tipo='usuario') AS n_com
-           FROM ordenes o"""
+           FROM ordenes o LEFT JOIN detalle_oc d ON d.numero_oc=o.numero_oc"""
     return [dict(r) for r in con.execute(q)]
 
 

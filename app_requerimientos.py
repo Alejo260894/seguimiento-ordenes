@@ -375,12 +375,14 @@ class EditorReq(tk.Toplevel):
         if not d:
             self.lbl_sap.config(text="" if not self.v["orden"].get().strip() else "La orden no está en el último reporte SAP cargado.")
             return None
-        for campo in rq.CAMPOS_FECHA:
+        for campo in rq.CAMPOS_FECHA + ["f_conformidad"]:
             if d.get(campo) and campo in self.sap_lbl:
                 self.sap_lbl[campo].config(text=f"SAP: {rq.fmt(d[campo])}")
         facts = ", ".join(f"{f['n_factura']} ({f['estado'] or 'sin estado'})" for f in d["facturas"]) or "sin factura"
-        self.lbl_sap.config(text=f"SAP: {d['proveedor']} · {d['moneda']} {d['monto'] or 0:,.2f} · OC {d['estado_oc']}\n"
-                                 f"Facturas: {facts}")
+        logistica = f" · {d['logistica']}" + (f" ({rq.fmt(d['fecha_entrada'])})" if d["fecha_entrada"] else "") \
+            if d["logistica"] else ""
+        self.lbl_sap.config(text=f"SAP: {d['proveedor']} · {d['moneda']} {d['monto'] or 0:,.2f} · OC {d['estado_oc']}"
+                                 f"{logistica}\nFacturas: {facts}")
         return d
 
     def traer_sap(self):
@@ -393,7 +395,7 @@ class EditorReq(tk.Toplevel):
             v = d.get(campo)
             if v in (None, "") or campo in rq.CAMPOS_VINCULADOS or self.v[campo].get().strip():
                 continue
-            valor = rq.fmt(v) if campo in rq.CAMPOS_FECHA else str(v)
+            valor = rq.fmt(v) if campo in rq.CAMPOS_FECHA or campo == "f_conformidad" else str(v)
             self.v[campo].set(valor)
             self._sap_form[campo] = valor          # queda marcado como dato de SAP al guardar
             llenados.append(rq.ETIQUETAS[campo])

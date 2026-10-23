@@ -7,6 +7,7 @@ Tablas (se relacionan por el N° de OC):
 - Requerimientos: una fila por requerimiento, con etapa, plazo, fechas del flujo y días de cada tramo.
 - Comentarios: historial de cada OC.
 - Proveedores: una fila por RUC con su puntaje de desempeño (scorecard).
+- Lineas: líneas de cada OC (reporte de detalle) con proyecto, unidad de negocio, área e ingreso de material.
 - Info: fecha del reporte SAP y de la exportación.
 
 KPI de abastecimiento (definiciones):
@@ -25,6 +26,7 @@ import consulta as cq
 import requerimientos as rq
 import semaforo as sem
 import seguimiento as sgm
+from detalle_sap import SIN_DETALLE
 
 ARCHIVO = "Datos Power BI.xlsx"
 MON = {"SOL": "PEN"}             # SAP usa SOL en facturas y PEN en la OC
@@ -45,7 +47,8 @@ def cumplimiento(sap, facturado):
         return "Cancelada", False
     if sap["estado"] != "Cerrado":
         return "En curso", False
-    if sgm.con_nota_entrada(sap.get("serie"), sap["estado"], sap.get("fecha")) and (pct is None or pct < 1 - TOLERANCIA):
+    if sgm.con_nota_entrada(sap.get("serie"), sap["estado"], sap.get("fecha"), sap.get("ingresado")) and (
+            pct is None or pct < 1 - TOLERANCIA):
         return "Atendida, pendiente de factura", False        # nota de entrada: la factura aún no se ingresa
     if not facturado:
         return "Cerrada sin factura", True
@@ -74,6 +77,7 @@ def tablas(con, umbrales):
     filas_req = rq.listar(con)
     universo = cq.universo(con, filas_req)
     n_com = dict(con.execute("SELECT numero_oc, COUNT(*) FROM comentarios WHERE tipo='usuario' GROUP BY numero_oc"))
+    det = {r["numero_oc"]: dict(r) for r in con.execute("SELECT * FROM detalle_oc")}     # reporte de detalle
     ult = sgm.ultimos_comentarios(con)
 
     ordenes, kpi_oc = [], {}
@@ -94,7 +98,8 @@ def tablas(con, umbrales):
             "completa": None if sap is None or not sap["total"] else
                         "Sí" if facturado >= sap["total"] * (1 - TOLERANCIA) else
                         "No" if sap["estado"] in ("Cerrado", "Cancelado")
-                                and not sgm.con_nota_entrada(sap["serie"], sap["estado"], sap["fecha"]) else None,
+                                and not sgm.con_nota_entrada(sap["serie"], sap["estado"], sap["fecha"],
+                                                             sap.get("ingresado")) else None,
             "plazo": sem.texto(sem.nivel_oc(o, umbrales)) if activa else ""}
         ordenes.append([
             x["oc"], x["comprador"], x["proveedor"], x["ruc"], fecha, _d(sap["aprobacion"]) if sap else None,
@@ -107,13 +112,16 @@ def tablas(con, umbrales):
             ult[x["oc"]][1] if x["oc"] in ult else "", _dt(ult[x["oc"]][0]) if x["oc"] in ult else None,
             ", ".join(f"{q['id']:03d}" for q in x["reqs"]), k["cumple"], "Sí" if evaluada else "No",
             facturado / x["total"] - 1 if evaluada and x["total"] else None, dias_fact,
-            None if dias_fact is None else "Sí" if dias_fact <= DIAS_FACTURA else "No"])
+            None if dias_fact is None else "Sí" if dias_fact <= DIAS_FACTURA else "No",
+            *ciclo(x, det.get(x["oc"]), fecha, vig)])
     col_ord = ["OC", "Comprador", "Proveedor", "RUC", "Fecha OC", "Aprobación OC", "Mes OC", "Moneda", "Total sin IGV",
                "Estado OC", "Categoría", "Status", "N° facturas", "Facturas pendientes", "Facturas vencidas",
                "Facturado sin IGV", "% facturado", "Pendiente de pago", "Seguimiento", "Estado de seguimiento",
                "Responsable", "Fecha compromiso", "Días desde la OC", "Plazo OC", "N° comentarios",
                "Último comentario", "Fecha último comentario", "Requerimientos", "Cumplimiento",
-               "Cumplimiento evaluado", "% desviación facturado", "Días OC → 1ra factura", "Factura a tiempo"]
+               "Cumplimiento evaluado", "% desviación facturado", "Días OC → 1ra factura", "Factura a tiempo",
+               "Tipo OC", "Estado logístico", "Fecha última entrada", "% ingresado", "Proyecto", "Unidad de negocio",
+               "Área", "Días OC → aprobación", "Días OC → entrada", "Días factura → pago"]
 
     facturas = []
     for f in sgm.listar_facturas(con):
@@ -161,8 +169,42 @@ def tablas(con, umbrales):
         "Requerimientos": (col_req, reqs),
         "Comentarios": (["OC", "Fecha", "Autor", "Tipo", "Texto"], comentarios),
         "Proveedores": provs,
+        "Lineas": lineas(con),
         "Info": (["Dato", "Fecha"], info),
     }
+
+
+def _dias(a, b):
+    """Días entre dos fechas (datetime o ISO); None si falta alguna o el resultado es negativo (regularización)."""
+    a, b = (_d(v) if isinstance(v, str) else v for v in (a, b))
+    if not a or not b:
+        return None
+    d = (b - a).days
+    return d if d >= 0 else None
+
+
+def ciclo(x, d, fecha, vigentes):
+    """Columnas del reporte de detalle y tiempos del ciclo OC → aprobación → entrada → factura → pago."""
+    d = d or {}
+    sap = x["sap"] or {}
+    pagos = [f["fecha_pago"] for f in vigentes if f["fecha_pago"]]
+    emisiones = [f["emision"] for f in vigentes if f["emision"]]
+    todas_pagadas = vigentes and all(f["estado_factura"] == "Pagado" for f in vigentes)
+    return [d.get("tipo_oc") or "", d.get("estado_logistico") or SIN_DETALLE, _d(d.get("fecha_entrada")),
+            d.get("pct_ingresado"), d.get("proyecto") or "", d.get("unidad_negocio") or "", d.get("area") or "",
+            _dias(fecha, sap.get("aprobacion")), _dias(fecha, d.get("fecha_entrada")),
+            _dias(min(emisiones), max(pagos)) if todas_pagadas and emisiones and pagos else None]
+
+
+def lineas(con):
+    """Tabla Lineas: una fila por línea de OC (solo OC aprobadas, del reporte de detalle)."""
+    filas = [[r["numero_oc"], r["linea"], r["tipo_oc"], r["codigo"], r["descripcion"], r["cantidad"], r["um"],
+              r["total_linea"], MON.get(r["moneda"], r["moneda"]), r["proyecto"], r["unidad_negocio"], r["area"],
+              r["ingresado"], r["pendiente_ingreso"], r["estado_logistico"], _d(r["fecha_entrada"])]
+             for r in con.execute("SELECT * FROM detalle_lineas ORDER BY numero_oc, linea")]
+    return (["OC", "Línea", "Tipo OC", "Código", "Descripción", "Cantidad", "UM", "Total línea sin IGV", "Moneda",
+             "Proyecto", "Unidad de negocio", "Área", "Cantidad ingresada", "Pendiente de ingreso", "Estado logístico",
+             "Fecha de entrada"], filas)
 
 
 def kpi_req(f, kpi_oc):

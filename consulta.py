@@ -65,7 +65,8 @@ def _resumen(x):
         "fecha": (sap or {}).get("fecha") or (o or {}).get("fecha_oc") or (fx[0]["fecha_oc"] if fx else "") or "",
         "mon": (sap or {}).get("mon") or (o or {}).get("mon") or (fx[0]["mon"] if fx else "") or r.get("moneda", ""),
         "total": (sap or {}).get("total") if sap else (o or {}).get("total"),
-        "estado_sap": sgm.estado_visible(sap["serie"], sap["estado"], sap["fecha"]) if sap else "No está en el último reporte",
+        "estado_sap": sgm.estado_visible(sap["serie"], sap["estado"], sap["fecha"], sap.get("ingresado"))
+                      if sap else "No está en el último reporte",
     }
     d["status"], d["nivel"] = status(x)
     d["categoria"] = next((c for p, c in CATEGORIAS if d["status"].startswith(p)), "Otro")
@@ -88,7 +89,7 @@ def status(x, hoy=None):
             return "No está en el último reporte SAP", "cerrada"
         return "No está en el reporte SAP (solo registrada en un requerimiento)", "atencion"
     estado = sap["estado"]
-    nota = sgm.con_nota_entrada(sap["serie"], estado, sap["fecha"])
+    nota = sgm.con_nota_entrada(sap["serie"], estado, sap["fecha"], sap.get("ingresado"))
     if not vigentes:
         if nota:
             return "Atendida con nota de entrada, pendiente de factura", "atencion"
@@ -125,8 +126,13 @@ def texto_status(x, fecha_reporte=None, comentarios=(), hoy=None):
         L.append(f"Comprador: {sap['usuario']} · Fecha OC: {_fmt(sap['fecha'])}"
                  + (f" · Aprobación: {_fmt(sap['aprobacion'])}" if sap["aprobacion"] else ""))
         L.append(f"Total sin IGV: {_monto(sap['mon'], sap['total'])} · Estado en SAP: {sap['estado']}"
-                 + (" (OC de bienes con nota de entrada: se atendió completa, falta ingresar la factura)"
-                    if sgm.con_nota_entrada(sap["serie"], sap["estado"], sap["fecha"]) else ""))
+                 + (" (con nota de entrada: material ingresado, falta ingresar la factura)"
+                    if sgm.con_nota_entrada(sap["serie"], sap["estado"], sap["fecha"], sap.get("ingresado")) else ""))
+        if sap.get("estado_logistico"):
+            log = f"Logística: {sap['tipo_oc'] or ''} · {sap['estado_logistico']}"
+            if sap.get("fecha_entrada"):
+                log += f" · última nota de entrada {_fmt(sap['fecha_entrada'])}"
+            L.append(log)
     elif x["comprador"]:
         L.append(f"Comprador: {x['comprador']}")
     L += [f"STATUS: {x['status']}", ""]

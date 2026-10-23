@@ -34,7 +34,10 @@ Reemplaza el llenado manual del Excel «SEGUIMIENTO DE REQUERIMIENTOS Y ORDENES�
 ## Aplicación «Seguimiento Ordenes.exe» (uso diario)
 Para abrirla, haz doble clic en el `.exe`. No necesita Python. Tarda unos segundos en arrancar.
 
-1. **📥 Cargar CSV de SAP…**: elige el CSV (o el xlsx) descargado de SAP.
+1. **📥 Cargar CSV de SAP…**: elige los dos reportes de SAP a la vez (con Ctrl). La app reconoce cuál es cuál:
+   - **«Control de órdenes»** (CSV o xlsx): es el reporte general. Con él se arma el control del día y el seguimiento.
+   - **Reporte de detalle «Seguimiento OC → Entrada → Factura → Pago»**: solo en **.xlsx**, porque el CSV de SAP sale en UTF-16 y desordena las columnas. Aporta las notas de entrada (ingreso de material), las facturas con su N° interno y «Pago parcial», y las líneas de cada OC con proyecto, unidad de negocio y área. **Solo se toman las OC aprobadas.**
+   - Si cargas solo el detalle, la app vuelve a aplicar el último Control con la información logística nueva.
    - Si el reporte trae muchas menos órdenes que el anterior (reporte filtrado o incompleto), la app **pregunta antes de aplicarlo**.
    - Un reporte **anterior** a la última carga no modifica nada ni genera un control nuevo.
 
@@ -44,7 +47,10 @@ Para abrirla, haz doble clic en el `.exe`. No necesita Python. Tarda unos segund
    - guarda una copia del CSV en `Cargas\` para conservar el historial;
    - actualiza el seguimiento:
      - solo entran las **OC sin factura que están En proceso**. Las Cerradas o Canceladas sin factura ya no se van a facturar y no se tratan;
-     - **excepción, OC de bienes (serie OCB / 26OCB) con fecha de OC desde el 01/09/2026**: «Cerrado» significa que ya tienen **nota de entrada** (se atendieron completas) y solo falta ingresar la factura. Entran al seguimiento y se ven como «Cerrado (nota de entrada)». El requerimiento queda en «Pendiente de factura» y en Power BI aparecen como «Pendiente de factura (nota de entrada)», sin contar como incumplimiento. La fecha de corte está en `seguimiento.py` (`NOTA_ENTRADA_DESDE`);
+     - **excepción, OC «Cerrado» con material ingresado** (nota de entrada, según el reporte de detalle): ya se atendieron y solo falta ingresar la factura. Entran al seguimiento y se ven como «Cerrado (nota de entrada)». El requerimiento queda en «Pendiente de factura». En Power BI aparecen como «Pendiente de factura (nota de entrada)» y no cuentan como incumplimiento.
+       - Si una OC todavía no está en el detalle, se usa una regla de respaldo: OC de bienes (OCB / 26OCB) con fecha desde el 01/09/2026 (`NOTA_ENTRADA_DESDE` en `seguimiento.py`).
+       - Una OC cerrada **sin** ingreso de material sale del seguimiento como «OC cerrada sin factura».
+     - los documentos de compra sin N° de factura (por ejemplo un DI, documento interno) cuentan como factura y se muestran como «DI s/n (OC …)»;
      - si en el nuevo reporte la OC ya trae factura, se cierra como **Facturada** y deja anotado el N° de factura;
      - si la OC pasa a Cerrada o Cancelada en SAP sin factura, se cierra como **OC cerrada sin factura** u **OC cancelada sin factura**, conservando sus comentarios;
      - si la OC ya no aparece en el reporte, se cierra como **Fuera del reporte**;
@@ -76,7 +82,13 @@ Para abrirla, haz doble clic en el `.exe`. No necesita Python. Tarda unos segund
    - **Ver en OC sin factura**, **Ver en Facturas** y **Abrir requerimiento** te llevan a la orden en su pestaña, sin filtros que la oculten.
    - Abajo se ven su historial y el cuadro de comentario, aunque la orden no esté en «OC sin factura».
 
-Filtros disponibles: texto, comprador, estado OC, situación, estado de seguimiento, solo sin comentarios y solo compromisos vencidos.
+Filtros disponibles: texto, comprador, estado OC, situación, estado de seguimiento, **logística**, solo sin comentarios y solo compromisos vencidos.
+
+La columna **Logística** viene del reporte de detalle:
+- Pendiente de ingreso, Ingreso parcial (con su %) o Material ingresado, con la fecha de la última nota de entrada;
+- «Servicio» en las OC de servicios.
+
+Con eso se distingue la OC que espera el material de la que espera la factura. En Facturas, las pagadas en parte se ven como **Pago parcial**. En los requerimientos, la fecha de la última nota de entrada llena sola la **conformidad** de los bienes recibidos por completo, y se usa para el OTIF.
 
 Colores de la lista:
 - amarillo: OC sin comentarios;
@@ -139,6 +151,12 @@ El nombre exacto de cada columna «Días: …» se ve en la tabla Requerimientos
 - **Tiempos del flujo**: promedio de cada columna «Días: …» por Tipo o Controller.
 - Una tabla de las OC «En proceso sin factura» con Días desde la OC, Responsable y Último comentario.
 
+**Página «Logística»** (tabla Lineas y columnas nuevas de Ordenes):
+- OC de bienes pendientes de ingreso, con ingreso parcial e ingresadas sin factura;
+- días promedio de la OC a la aprobación, de la OC a la nota de entrada y de la factura al pago;
+- filtros por unidad de negocio, proyecto y comprador;
+- la lista de OC que esperan material, con su antigüedad.
+
 **KPIs de abastecimiento** (página «KPIs de abastecimiento» y tabla Proveedores):
 
 | KPI | Cálculo | Dato que lo alimenta |
@@ -182,7 +200,7 @@ Archivos de la aplicación (deben quedarse junto al `.exe`):
 La configuración de cada usuario (comprador, firma, rutas y plazos) está en `%APPDATA%\Seguimiento Ordenes\config.json`, no en la carpeta compartida.
 
 **Carga automática (opcional)**: con el Programador de tareas de Windows puedes ejecutar
-`"Seguimiento Ordenes.exe" --cargar "C:\...\Control de ordenes.csv"`. El resultado queda en `ultima_carga.log`, que empieza con uno de estos estados:
+`"Seguimiento Ordenes.exe" --cargar "C:\...\Control de ordenes.csv" "C:\...\Seguimiento.xlsx"`. Puedes pasar uno o los dos reportes. El resultado queda en `ultima_carga.log`, que empieza con uno de estos estados:
 - **OK**: la carga se aplicó.
 - **OMITIDO**: el reporte era anterior a la última carga.
 - **REVISAR**: el reporte parecía incompleto y no se aplicó. Cárgalo desde la app para confirmarlo, o agrega `--forzar`.

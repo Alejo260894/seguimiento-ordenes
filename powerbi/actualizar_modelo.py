@@ -4,7 +4,7 @@ Pone al día el modelo de Power BI (Seguimiento.SemanticModel) con las columnas 
     python actualizar_modelo.py
 
 - Agrega a Ordenes y Requerimientos las columnas nuevas de «Datos Power BI.xlsx» (con su tipo en Power Query).
-- Crea la tabla Proveedores (scorecard) y su relación Ordenes[RUC] → Proveedores[RUC].
+- Crea las tablas Proveedores (scorecard) y Lineas (detalle de cada OC), con sus relaciones.
 - Agrega las medidas de la carpeta «KPIs de abastecimiento» a la tabla Medidas.
 Es idempotente: lo que ya existe no se toca. Power BI Desktop debe estar CERRADO.
 Al abrir el informe, pulsa «Actualizar» para cargar las columnas nuevas.
@@ -21,7 +21,10 @@ TABLAS = os.path.join(DEF, "tables")
 # (nombre, tipo) — tipo: texto, entero, decimal, porcentaje, fecha
 COLUMNAS = {
     "Ordenes": [("Cumplimiento", "texto"), ("Cumplimiento evaluado", "texto"), ("% desviación facturado", "porcentaje"),
-                ("Días OC → 1ra factura", "entero"), ("Factura a tiempo", "texto")],
+                ("Días OC → 1ra factura", "entero"), ("Factura a tiempo", "texto"),
+                ("Tipo OC", "texto"), ("Estado logístico", "texto"), ("Fecha última entrada", "fecha"),
+                ("% ingresado", "porcentaje"), ("Proyecto", "texto"), ("Unidad de negocio", "texto"), ("Área", "texto"),
+                ("Días OC → aprobación", "entero"), ("Días OC → entrada", "entero"), ("Días factura → pago", "entero")],
     "Requerimientos": [("Monto referencial", "decimal"), ("Tipo de referencia", "texto"), ("Ahorro", "decimal"),
                        ("Base del ahorro", "decimal"), ("% ahorro", "porcentaje"), ("Fecha de conformidad", "fecha"),
                        ("A tiempo", "texto"), ("Completo", "texto"), ("OTIF", "texto"), ("Lead time (días)", "entero")],
@@ -31,7 +34,14 @@ COLUMNAS = {
                     ("Días promedio OC → factura", "decimal"), ("Entregas evaluadas (OTIF)", "entero"),
                     ("% OTIF", "porcentaje"), ("OC sin factura atrasadas", "entero"), ("Puntaje", "decimal"),
                     ("Clasificación", "texto"), ("Criterios usados", "texto")],
+    "Lineas": [("OC", "entero"), ("Línea", "entero"), ("Tipo OC", "texto"), ("Código", "texto"),
+               ("Descripción", "texto"), ("Cantidad", "decimal"), ("UM", "texto"), ("Total línea sin IGV", "decimal"),
+               ("Moneda", "texto"), ("Proyecto", "texto"), ("Unidad de negocio", "texto"), ("Área", "texto"),
+               ("Cantidad ingresada", "decimal"), ("Pendiente de ingreso", "decimal"), ("Estado logístico", "texto"),
+               ("Fecha de entrada", "fecha")],
 }
+# Tablas nuevas: (columna en la tabla, tabla y columna del lado «uno» de la relación)
+TABLAS_NUEVAS = {"Proveedores": ("Ordenes.RUC", "Proveedores.RUC"), "Lineas": ("Lineas.OC", "Ordenes.OC")}
 TIPOS = {  # tipo -> (dataType, formatString, summarizeBy, tipo M)
     "texto": ("string", None, "none", "type text"),
     "entero": ("int64", "0", "sum", "Int64.Type"),
@@ -70,6 +80,14 @@ MEDIDAS = [
     ("Ahorro sobre referencia", 'VAR v = [% Ahorro sobre referencia] RETURN IF(ISBLANK(v), "Sin datos aún", FORMAT(v, "0.0%"))', None),
     ("OTIF (a tiempo y completo)", 'VAR v = [OTIF %] RETURN IF(ISBLANK(v), "Sin datos aún", FORMAT(v, "0.0%"))', None),
     ("Lead time a la entrega (días)", 'VAR v = [Lead time a la entrega] RETURN IF(ISBLANK(v), "Sin datos aún", FORMAT(v, "0.0"))', None),
+    # Logística (reporte de detalle)
+    ("OC pendientes de ingreso", 'CALCULATE([N° OC], Ordenes[Estado logístico] = "Pendiente de ingreso")', "#,0"),
+    ("OC con ingreso parcial", 'CALCULATE([N° OC], Ordenes[Estado logístico] = "Ingreso parcial")', "#,0"),
+    ("OC ingresadas sin factura", 'CALCULATE([N° OC], Ordenes[Categoría] = "Pendiente de factura (nota de entrada)")', "#,0"),
+    ("Prom. días OC → aprobación", "AVERAGE(Ordenes[Días OC → aprobación])", "0.0"),
+    ("Prom. días OC → entrada", "AVERAGE(Ordenes[Días OC → entrada])", "0.0"),
+    ("Prom. días factura → pago", "AVERAGE(Ordenes[Días factura → pago])", "0.0"),
+    ("Monto de líneas", "SUM(Lineas[Total línea sin IGV])", "#,0.00"),
 ]
 
 
@@ -115,32 +133,34 @@ def columnas_en_tabla(tabla):
     return len(nuevas)
 
 
-def tabla_proveedores():
-    ruta = os.path.join(TABLAS, "Proveedores.tmdl")
+def tabla_nueva(nombre):
+    """Crea la tabla `nombre` (Excel «Datos Power BI.xlsx») con su relación; si ya existe, agrega columnas faltantes."""
+    ruta = os.path.join(TABLAS, f"{nombre}.tmdl")
     if os.path.exists(ruta):
-        return columnas_en_tabla("Proveedores")
-    tipos = ", ".join(f'{{"{n}", {TIPOS[t][3]}}}' for n, t in COLUMNAS["Proveedores"])
-    txt = (f"table Proveedores\n\tlineageTag: {uuid.uuid4()}\n\n"
-           + "".join(_columna(n, t) for n, t in COLUMNAS["Proveedores"])
-           + "\tpartition Proveedores = m\n\t\tmode: import\n\t\tsource =\n\t\t\t\tlet\n"
+        return columnas_en_tabla(nombre)
+    tipos = ", ".join(f'{{"{n}", {TIPOS[t][3]}}}' for n, t in COLUMNAS[nombre])
+    txt = (f"table {nombre}\n\tlineageTag: {uuid.uuid4()}\n\n"
+           + "".join(_columna(n, t) for n, t in COLUMNAS[nombre])
+           + f"\tpartition {nombre} = m\n\t\tmode: import\n\t\tsource =\n\t\t\t\tlet\n"
            + f'\t\t\t\t    Origen = Excel.Workbook(File.Contents("{_ruta_excel()}"), null, true),\n'
-           + '\t\t\t\t    Proveedores_Table = Origen{[Item="Proveedores",Kind="Table"]}[Data],\n'
-           + f'\t\t\t\t    #"Tipo cambiado" = Table.TransformColumnTypes(Proveedores_Table,{{{tipos}}})\n'
+           + f'\t\t\t\t    {nombre}_Table = Origen{{[Item="{nombre}",Kind="Table"]}}[Data],\n'
+           + f'\t\t\t\t    #"Tipo cambiado" = Table.TransformColumnTypes({nombre}_Table,{{{tipos}}})\n'
            + '\t\t\t\tin\n\t\t\t\t    #"Tipo cambiado"\n\n'
            + "\tannotation PBI_ResultType = Table\n\n\tannotation PBI_NavigationStepName = Navegación\n\n")
     open(ruta, "w", encoding="utf-8", newline="").write(txt)
     modelo = os.path.join(DEF, "model.tmdl")
     m = open(modelo, encoding="utf-8").read()
-    if "ref table Proveedores" not in m:
-        m = m.replace('annotation PBI_QueryOrder = [', 'annotation PBI_QueryOrder = ["Proveedores",', 1)
-        m = m.rstrip("\n") + "\nref table Proveedores\n"
+    if f"ref table {nombre}\n" not in m + "\n":
+        m = m.replace('annotation PBI_QueryOrder = [', f'annotation PBI_QueryOrder = ["{nombre}",', 1)
+        m = m.rstrip("\n") + f"\nref table {nombre}\n"
         open(modelo, "w", encoding="utf-8", newline="").write(m)
+    desde, hacia = TABLAS_NUEVAS[nombre]
     rel = os.path.join(DEF, "relationships.tmdl")
     r = open(rel, encoding="utf-8").read()
-    if "toColumn: Proveedores.RUC" not in r:
-        r = r.rstrip("\n") + f"\n\nrelationship {uuid.uuid4()}\n\tfromColumn: Ordenes.RUC\n\ttoColumn: Proveedores.RUC\n"
+    if f"fromColumn: {desde}\n\ttoColumn: {hacia}" not in r:
+        r = r.rstrip("\n") + f"\n\nrelationship {uuid.uuid4()}\n\tfromColumn: {desde}\n\ttoColumn: {hacia}\n"
         open(rel, "w", encoding="utf-8", newline="").write(r)
-    return len(COLUMNAS["Proveedores"])
+    return len(COLUMNAS[nombre])
 
 
 def medidas():
@@ -164,7 +184,8 @@ def medidas():
 def main():
     print("Ordenes: columnas nuevas", columnas_en_tabla("Ordenes"))
     print("Requerimientos: columnas nuevas", columnas_en_tabla("Requerimientos"))
-    print("Proveedores: columnas", tabla_proveedores())
+    for nombre in TABLAS_NUEVAS:
+        print(f"{nombre}: columnas", tabla_nueva(nombre))
     print("Medidas nuevas", medidas())
     print("Listo. Abre Seguimiento.pbip y pulsa «Actualizar».")
 
