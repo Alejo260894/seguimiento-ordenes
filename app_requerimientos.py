@@ -493,6 +493,7 @@ def construir(app, tab_req, tab_ind):
     app.vi_hasta = app._combo(fi, "hasta:", ["Todos"], 9, lambda: pintar_ind(app))
     app.vi_controller = app._combo(fi, "Controller:", ["Todos"], 26, lambda: pintar_ind(app))
     ttk.Button(fi, text="📤  Exportar Excel", command=lambda: exportar(app)).pack(side="right")
+    ttk.Button(fi, text="📈  Datos para Power BI", command=app.exportar_powerbi).pack(side="right", padx=6)
     ttk.Label(tab_ind, text="Pendientes por etapa (las etapas resaltadas son el seguimiento hasta el envío de la OC)",
               font=("Segoe UI", 10, "bold"), padding=(6, 4)).pack(fill="x")
     app.tree_pend = ttk.Treeview(tab_ind, columns=("etapa", "n", "rojo", "amarillo", "prom", "max", "pen", "usd"),

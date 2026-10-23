@@ -12,6 +12,13 @@ from datetime import date, datetime
 import seguimiento as sgm
 
 
+# Status corto -> categoría (para agrupar en gráficos: Power BI)
+CATEGORIAS = [("Pagada", "Pagada"), ("Pago parcial", "Pago parcial"), ("Facturada, pendiente", "Pendiente de pago"),
+              ("En proceso, sin factura", "En proceso sin factura"), ("Sin factura · cerrada", "Cerrada sin factura"),
+              ("Cerrada sin factura", "Cerrada sin factura"), ("Cancelada sin factura", "Cancelada sin factura"),
+              ("No está", "No está en el reporte")]
+
+
 def _fmt(iso):
     return f"{iso[8:10]}/{iso[5:7]}/{iso[:4]}" if iso else ""
 
@@ -60,6 +67,7 @@ def _resumen(x):
         "estado_sap": sap["estado"] if sap else "No está en el último reporte",
     }
     d["status"], d["nivel"] = status(x)
+    d["categoria"] = next((c for p, c in CATEGORIAS if d["status"].startswith(p)), "Otro")
     d["texto_busqueda"] = " ".join(str(v or "") for v in (
         x["oc"], d["comprador"], d["proveedor"], d["ruc"], d["status"],
         *(f["n_factura"] for f in fx),

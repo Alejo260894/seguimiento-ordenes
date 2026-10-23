@@ -5,6 +5,7 @@ Seguimiento de órdenes — aplicación de escritorio.
 - Pestaña "OC sin factura": OCs en proceso sin factura; estado, responsable, fecha compromiso y comentarios.
 - Pestaña "Facturas": facturas del último reporte (Pendiente de pago / Pagado) para revisar hasta su pago.
 - Pestaña "Consultar OC": el status de cualquier orden (SAP, facturas, requerimientos y seguimiento) en un solo lugar.
+- "Datos Power BI.xlsx": tablas para Power BI, regeneradas en cada carga, al cerrar y desde Indicadores.
 - Los comentarios son por OC, se guardan en seguimiento.db (junto a la aplicación) y se arrastran a cada
   control nuevo; las facturas nuevas y los pagos detectados quedan registrados en el historial de la OC.
 - Varios compradores pueden usar la misma base (carpeta de red): cada uno tiene su configuración en
@@ -24,6 +25,7 @@ from datetime import datetime, date
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
+import powerbi as pbi
 import procesar_sap as ps
 import seguimiento as sgm
 import requerimientos as rq
@@ -214,6 +216,10 @@ def aplicar_carga(ruta, df, log, meta, fr):
             salida = generar_control(df, meta, log, con, fr)
             con.execute("UPDATE cargas SET salida=? WHERE id=(SELECT MAX(id) FROM cargas)", (salida,))
             con.commit()
+            try:
+                pbi.exportar(con, BASE, sem.umbrales(leer_cfg()))
+            except Exception:  # noqa: BLE001 — p. ej. abierto en Excel; se reintenta al cerrar la app
+                registrar_error("Datos Power BI:\n" + traceback.format_exc())
     finally:
         con.close()
     if salida:
@@ -264,6 +270,7 @@ class App(tk.Tk):
         self.data_version = None             # cambia cuando otro usuario guarda en la base
         self._ui()
         self.bind_all("<F5>", lambda e: self.actualizar_vista())
+        self.protocol("WM_DELETE_WINDOW", self._cerrar)
         self.bind("<Activate>", lambda e: self.after_idle(self._revisar_cambios_externos))
         self.after(100, self._inicio)
         self.refrescar()
@@ -277,6 +284,28 @@ class App(tk.Tk):
             registrar_error("Respaldo diario:\n" + traceback.format_exc())
         if self.cfg.get("pendientes_al_abrir", True):
             self.pendientes_de_hoy(auto=True)
+
+    def _cerrar(self):
+        """Al cerrar: guarda lo editado en el panel y deja al día los datos de Power BI."""
+        try:
+            self._guardar_pendientes()
+            pbi.exportar(self.con, BASE, sem.umbrales(self.cfg))
+        except Exception:  # noqa: BLE001 — cerrar nunca debe fallar
+            registrar_error("Al cerrar:\n" + traceback.format_exc())
+        self.destroy()
+
+    def exportar_powerbi(self):
+        self._guardar_pendientes()
+        try:
+            ruta = pbi.exportar(self.con, BASE, sem.umbrales(self.cfg))
+        except PermissionError:
+            messagebox.showwarning("Datos Power BI", f"«{pbi.ARCHIVO}» está abierto en Excel: ciérralo y vuelve a "
+                                                     f"intentarlo.", parent=self)
+            return
+        if messagebox.askyesno("Datos Power BI", f"Se actualizó «{pbi.ARCHIVO}» en la carpeta de la aplicación.\n\n"
+                                                 f"En Power BI pulsa «Actualizar» para ver los datos nuevos.\n\n"
+                                                 f"¿Abrir la carpeta?", parent=self):
+            os.startfile(os.path.dirname(ruta))
 
     def report_callback_exception(self, exc, val, tb):
         """Errores en botones: en el .exe no hay consola, así que se muestran y se guardan en errores.log."""

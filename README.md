@@ -99,6 +99,47 @@ Si eliges el estado **"Cerrar sin factura"**, la OC deja de estar activa. Úsalo
 
 **F5** actualiza la vista. Si el otro comprador o una carga programada cambió la base mientras la app estaba abierta, la vista se refresca sola al volver a la ventana.
 
+### Power BI
+La app deja al día **`Datos Power BI.xlsx`** en esta carpeta, con 5 tablas:
+- **Ordenes**: todas las OC, con Categoría, Status, facturado, pendiente, seguimiento y plazo.
+- **Facturas**: con días para vencer y plazo.
+- **Requerimientos**: con etapa, plazo, fechas del flujo y días de cada tramo.
+- **Comentarios**.
+- **Info**: fecha del reporte SAP y de la exportación.
+
+El archivo se regenera en cada carga del reporte SAP, al cerrar la app y con **📈 Datos para Power BI** en la pestaña Indicadores.
+
+**Conectarlo (una sola vez):**
+1. En Power BI Desktop, ve a **Obtener datos → Libro de Excel** y elige `Datos Power BI.xlsx`.
+2. En el navegador, marca las **tablas** (icono de tabla, no las hojas): Ordenes, Facturas, Requerimientos, Comentarios e Info. Pulsa **Cargar**.
+3. En la vista **Modelo**, revisa estas relaciones (Power BI suele crearlas solo); todas son de 1 a varios y de una sola dirección:
+   - Ordenes[OC] → Facturas[OC];
+   - Ordenes[OC] → Comentarios[OC];
+   - Ordenes[OC] → Requerimientos[Orden].
+4. Guarda el informe (`.pbix`) donde quieras.
+
+Para ver los datos nuevos, pulsa **Inicio → Actualizar** en Power BI. El Excel debe estar cerrado al actualizar.
+
+**Medidas útiles** (Nueva medida). Los montos están en distintas monedas: usa la columna **Moneda** como filtro o en la leyenda para no sumar soles con dólares.
+```
+OC = DISTINCTCOUNT(Ordenes[OC])
+Pendiente de pago = SUM(Facturas[Importe pendiente])
+Facturas vencidas = CALCULATE(COUNTROWS(Facturas), Facturas[Plazo factura] = "Vencida")
+Requerimientos abiertos = CALCULATE(COUNTROWS(Requerimientos), Requerimientos[Abierto / cerrado] = "Abierto")
+Atrasados = CALCULATE(COUNTROWS(Requerimientos), Requerimientos[Plazo] = "Atrasado")
+Días solicitud → envío OC = AVERAGE(Requerimientos[Días: Solicitud → Envío de OC (total)])
+```
+El nombre exacto de cada columna «Días: …» se ve en la tabla Requerimientos. Los días negativos (anticipos o regularizaciones) vienen vacíos y se cuentan en «Tramos con anticipo».
+
+**Visuales sugeridos:**
+- Ordenes por **Categoría**, en anillo o barras, con segmentadores de Comprador, Moneda y Mes OC.
+- **Pendiente de pago** por Proveedor (top 10) y por Mes vencimiento.
+- **Requerimientos por Etapa**, con el Plazo como leyenda (atrasado, atención, en plazo).
+- **Tiempos del flujo**: promedio de cada columna «Días: …» por Tipo o Controller.
+- Una tabla de las OC «En proceso sin factura» con Días desde la OC, Responsable y Último comentario.
+
+Para publicarlo en Power BI Service y compartirlo hace falta una licencia Pro. Como el archivo está en OneDrive, la actualización programada se puede configurar conectando por la ruta de SharePoint o OneDrive.
+
 ### Dos compradores en la misma base
 - La carpeta de la aplicación debe estar en una **carpeta de red** (servidor), con el `.exe`, `seguimiento.db`, `Cargas\` y `Respaldos\`. Cada comprador abre el mismo `.exe` (conviene un acceso directo en el escritorio).
 - **No uses OneDrive ni SharePoint para la base compartida.** Cada equipo sincroniza su propia copia y, si los dos guardan, OneDrive crea copias en conflicto y se pierden cambios.
