@@ -42,7 +42,13 @@ ETIQUETAS = {
     "orden": "N° de orden", "recepcion_fact": "Recepción de factura", "envio_aprob_fact": "Envío de aprobación de factura",
     "validacion_fact": "Validación de factura", "num_factura": "N° de factura", "envio_pago": "Envío para pago",
     "fecha_pago": "Fecha de pago", "notas": "Notas", "comprador": "Comprador",
+    "monto_ref": "Monto referencial", "tipo_ref": "Tipo de referencia", "f_conformidad": "Fecha de conformidad",
 }
+# Campos para los KPI de abastecimiento (no existen en el Excel CONTROL original):
+# - monto_ref / tipo_ref: precio de referencia (cotización inicial, presupuesto…) -> Ahorro = referencial − monto OC
+# - f_conformidad: entrega real o conformidad del servicio -> a tiempo si es ≤ fecha fin (OTIF)
+CAMPOS_KPI = ["monto_ref", "tipo_ref", "f_conformidad"]
+TIPOS_REF = ["Cotización inicial", "Presupuesto", "Precio histórico", "Precio de mercado", "Licitación"]
 TIPOS = ["RQ", "VALO", "VUELO", "RH"]
 MONEDAS = ["PEN", "USD", "CAD", "AUD", "GBP", "EUR", "ZAR"]
 MON_SAP = {"SOL": "PEN"}
@@ -126,6 +132,9 @@ def preparar(con):
     con.executescript(SCHEMA)
     _agregar_columna(con, "sap_fact", "monto", "REAL")               # FT Sin Imp. de cada factura
     _agregar_columna(con, "req", "manual", "TEXT DEFAULT '[]'")      # campos que el usuario vació a propósito
+    _agregar_columna(con, "req", "monto_ref", "REAL")
+    _agregar_columna(con, "req", "tipo_ref", "TEXT DEFAULT ''")
+    _agregar_columna(con, "req", "f_conformidad", "TEXT DEFAULT ''")
     if "comprador" not in {r[1] for r in con.execute("PRAGMA table_info(req)")}:
         # Base compartida entre compradores: cada requerimiento tiene su comprador (mismo nombre que «Usuario» en SAP)
         con.execute("ALTER TABLE req ADD COLUMN comprador TEXT DEFAULT ''")
@@ -462,7 +471,7 @@ def guardar(con, valores, autor):
         ult = con.execute("SELECT autor, fecha FROM req_eventos WHERE req_id=? ORDER BY fecha DESC, id DESC LIMIT 1",
                           (rid,)).fetchone()
         raise EdicionSimultanea(f"{ult['autor']} ({fmt(ult['fecha'][:10])} {ult['fecha'][11:16]})" if ult else "otro usuario")
-    campos = [c for c, _, _ in CAMPOS if c != "id"] + ["notas", "comprador"]
+    campos = [c for c, _, _ in CAMPOS if c != "id"] + ["notas", "comprador"] + CAMPOS_KPI
     if "comprador" not in valores:
         valores["comprador"] = prev["comprador"] if prev is not None else ""
     if prev is None:
@@ -497,7 +506,8 @@ def guardar(con, valores, autor):
         for c in campos:
             nuevo, viejo = valores.get(c), prev[c]
             if _distinto(c, nuevo, viejo):
-                ver = lambda v: "(vacío)" if _norm(v) is None else (fmt(v) if c in CAMPOS_FECHA else (f"{v:,.2f}" if c == "monto" else v))
+                ver = lambda v: "(vacío)" if _norm(v) is None else (
+                    fmt(v) if c in CAMPOS_FECHA or c == "f_conformidad" else f"{v:,.2f}" if c in ("monto", "monto_ref") else v)
                 if c != "notas" and c not in limpiados:
                     cambios.append(f"{ETIQUETAS[c]}: {ver(viejo)} → {ver(nuevo)}")
                 if c in sap_form:
@@ -625,7 +635,8 @@ def exportar_excel(con, salida, plazos=None, comprador=None):
     # --- CONTROL (mismas columnas que el Excel original + etapa y tiempos)
     ws = wb.add_worksheet("CONTROL")
     extra = ["COMPRADOR", "CONTROLLER", "CONTROLLER2", "JEFE DE PROYECTO", "ETAPA", "DÍAS EN ETAPA", "PLAZO", "ESTADO OC SAP",
-             "ÚLTIMO COMENTARIO OC", "DATOS DESDE SAP", "NOTAS"]
+             "ÚLTIMO COMENTARIO OC", "DATOS DESDE SAP", "MONTO REFERENCIAL", "TIPO DE REFERENCIA",
+             "FECHA DE CONFORMIDAD", "NOTAS"]
     tramos = [t[0] for t in TRAMOS]
     enc = [h for _, h, _ in CAMPOS] + extra + [f"DÍAS: {t}" for t in tramos]
     pos = {h: i for i, h in enumerate(enc)}
@@ -643,7 +654,9 @@ def exportar_excel(con, salida, plazos=None, comprador=None):
             fila.append(datetime.strptime(v, "%Y-%m-%d") if tipo == "fecha" and v else (v if v not in ("", None) else None))
         fila += [f["comprador"] or None, f["controller"], f["controller2"], f["jefe"], f["etapa"], f["dias_etapa"], plazos.get(f["id"]) or None,
                  f["sap_estado"] or None,
-                 f["com_oc"] or None, ", ".join(ETIQUETAS[c] for c in f["desde_sap"]), f["notas"] or None]
+                 f["com_oc"] or None, ", ".join(ETIQUETAS[c] for c in f["desde_sap"]), f["monto_ref"],
+                 f["tipo_ref"] or None, datetime.strptime(f["f_conformidad"], "%Y-%m-%d") if f["f_conformidad"] else None,
+                 f["notas"] or None]
         fila += [None] * len(tramos)
         datos.append(fila)
     encabezado = {k: e for k, e, _ in CAMPOS}
@@ -668,6 +681,9 @@ def exportar_excel(con, salida, plazos=None, comprador=None):
     ws.set_column(pos["ESTADO OC SAP"], pos["ESTADO OC SAP"], 13)
     ws.set_column(pos["ÚLTIMO COMENTARIO OC"], pos["ÚLTIMO COMENTARIO OC"], 40)
     ws.set_column(pos["NOTAS"], pos["NOTAS"], 40)
+    ws.set_column(pos["MONTO REFERENCIAL"], pos["MONTO REFERENCIAL"], 14, fm)
+    ws.set_column(pos["TIPO DE REFERENCIA"], pos["TIPO DE REFERENCIA"], 18)
+    ws.set_column(pos["FECHA DE CONFORMIDAD"], pos["FECHA DE CONFORMIDAD"], 13, fd)
     ws.set_column(pos["NOTAS"] + 1, len(enc) - 1, 14)
     ws.set_row(1, 45)
     ws.freeze_panes(2, 3)

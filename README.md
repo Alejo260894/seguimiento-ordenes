@@ -138,7 +138,21 @@ El nombre exacto de cada columna «Días: …» se ve en la tabla Requerimientos
 - **Tiempos del flujo**: promedio de cada columna «Días: …» por Tipo o Controller.
 - Una tabla de las OC «En proceso sin factura» con Días desde la OC, Responsable y Último comentario.
 
+**KPIs de abastecimiento** (página «KPIs de abastecimiento» y tabla Proveedores):
+
+| KPI | Cálculo | Dato que lo alimenta |
+|---|---|---|
+| 1. Ahorro | Monto referencial − monto de la OC (% sobre el referencial) | **Monto referencial** y **Tipo de referencia** en el formulario del requerimiento |
+| 2. OTIF | A tiempo (conformidad ≤ fecha fin) **y** completo (OC facturada al 100 %) | **Conformidad (entrega real)** en el flujo de pago del requerimiento |
+| 3. Lead time | Días de la solicitud al envío de la OC, a la factura, a la entrega (conformidad) y al pago | Fechas del requerimiento |
+| 4. Cumplimiento | % de OC cerradas facturadas por el monto aprobado (±0.5 %) | Reporte SAP |
+| 5. Desempeño de proveedores | Puntaje = 40 % cumplimiento + 30 % puntualidad (1.ª factura ≤ 30 días) + 30 % OTIF. Solo cuentan los criterios con 3 casos o más. A ≥ 85, B 70 a 85, C < 70 | Reporte SAP y requerimientos |
+
+Los pesos, la tolerancia y los días se cambian al inicio de `powerbi.py` (`PESOS`, `TOLERANCIA`, `DIAS_FACTURA`, `MIN_EVAL`). Ahorro y OTIF muestran «Sin datos aún» hasta que registres los campos nuevos.
+
 **Informe listo (`powerbi\Seguimiento.pbip`):**
+- `python powerbi\actualizar_modelo.py` agrega al modelo las columnas, la tabla Proveedores y las medidas de los KPIs. Si lo vuelves a ejecutar, no duplica nada.
+- `powerbi\tema_seguimiento.json` es el tema de colores (paleta, tarjetas con borde redondeado y sombra, encabezados de tabla). El generador lo aplica.
 - Las medidas están en `powerbi\medidas.tmdl`. Se pegan en la vista TMDL de Power BI y se pulsa Aplicar.
 - Las páginas **Resumen, Facturas, Requerimientos y Tiempos** se generan con `python powerbi\generar_paginas.py`, **con Power BI cerrado**.
   - El script revisa que cada campo exista en el modelo antes de escribir.

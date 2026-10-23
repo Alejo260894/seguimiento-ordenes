@@ -181,6 +181,13 @@ class EditorReq(tk.Toplevel):
                        "moneda": self._combo(det, 4, 2, "moneda", "Moneda:", rq.MONEDAS)}
         self.lbl_vinc = ttk.Label(det, text="", foreground="#2F5597", wraplength=520, justify="left")
         self.lbl_vinc.grid(row=4, column=4, columnspan=2, sticky="w", padx=10)
+        # KPI de ahorro: precio de referencia contra lo aprobado en la OC
+        self._campo(det, 5, 0, "monto_ref", "Monto referencial:", ancho=14)
+        self._combo(det, 5, 2, "tipo_ref", "Tipo de referencia:", self._valores("tipo_ref", rq.TIPOS_REF), editable=True)
+        self.lbl_ahorro = ttk.Label(det, text="", foreground="#2E7D32")
+        self.lbl_ahorro.grid(row=5, column=4, columnspan=2, sticky="w", padx=10)
+        for campo in ("monto_ref", "monto"):
+            self.v[campo].trace_add("write", lambda *_: self._mostrar_ahorro())
 
         # ---- Flujos
         fv = ttk.LabelFrame(cuerpo, text="Flujo valorización", padding=8)
@@ -212,6 +219,9 @@ class EditorReq(tk.Toplevel):
         self._campo(fp, 1, 4, "num_factura", "N° de factura:", ancho=28)
         self._fecha(fp, 2, 0, "envio_pago", "Envío para pago:")
         self._fecha(fp, 2, 4, "fecha_pago", "Fecha de pago:")
+        self._fecha(fp, 3, 0, "f_conformidad", "Conformidad (entrega real):")
+        ttk.Label(fp, text="para el OTIF: a tiempo si es hasta la fecha fin", foreground="#808080").grid(
+            row=3, column=2, columnspan=3, sticky="w")
 
         # ---- Notas e historial
         nh = ttk.Frame(cuerpo)
@@ -284,6 +294,9 @@ class EditorReq(tk.Toplevel):
             else:
                 self.v[campo].set("" if val is None else str(val))
         self.v["comprador"].set(r.get("comprador") or ("" if r else self.app.cfg.get("comprador", "")))
+        self.v["monto_ref"].set("" if r.get("monto_ref") is None else f"{r['monto_ref']:,.2f}")
+        self.v["tipo_ref"].set(r.get("tipo_ref") or "")
+        self.v["f_conformidad"].set(rq.fmt(r.get("f_conformidad") or ""))
         if not r:
             self.v["f_solic"].set(date.today().strftime("%d/%m/%Y"))
         self.txt_notas.insert("1.0", r.get("notas") or "")
@@ -405,7 +418,24 @@ class EditorReq(tk.Toplevel):
                 vals[campo] = s.upper() if campo in ("estatus", "tipo", "proyecto") else s
         vals["notas"] = self.txt_notas.get("1.0", "end").strip()
         vals["comprador"] = " ".join(self.v["comprador"].get().split())
+        self._campo_error = "monto_ref"
+        vals["monto_ref"] = leer_monto(self.v["monto_ref"].get())
+        vals["tipo_ref"] = " ".join(self.v["tipo_ref"].get().split())
+        self._campo_error = "f_conformidad"
+        vals["f_conformidad"] = iso_desde_ddmm(self.v["f_conformidad"].get())
         return vals
+
+    def _mostrar_ahorro(self):
+        try:
+            ref, monto = leer_monto(self.v["monto_ref"].get()), leer_monto(self.v["monto"].get())
+        except ValueError:
+            ref = monto = None
+        if not ref or monto is None:
+            self.lbl_ahorro.config(text="Ahorro: se calcula con el monto referencial y el monto de la OC")
+            return
+        ahorro = ref - monto
+        self.lbl_ahorro.config(text=f"Ahorro: {ahorro:,.2f} ({ahorro / ref:.1%} del referencial)",
+                               foreground="#2E7D32" if ahorro >= 0 else "#C00000")
 
     def guardar(self):
         try:

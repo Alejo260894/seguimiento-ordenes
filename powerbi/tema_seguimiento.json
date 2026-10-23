@@ -1,0 +1,49 @@
+{
+  "name": "Seguimiento abastecimiento",
+  "dataColors": ["#2563EB", "#0EA5A4", "#F59E0B", "#E11D48", "#7C3AED", "#16A34A", "#EA580C", "#0891B2", "#DB2777", "#65A30D"],
+  "background": "#FFFFFF",
+  "foreground": "#1E293B",
+  "tableAccent": "#1E3A8A",
+  "good": "#16A34A",
+  "neutral": "#F59E0B",
+  "bad": "#E11D48",
+  "maximum": "#1E3A8A",
+  "center": "#93C5FD",
+  "minimum": "#EFF6FF",
+  "textClasses": {
+    "callout": {"fontFace": "Segoe UI Semibold", "fontSize": 26, "color": "#1E293B"},
+    "title": {"fontFace": "Segoe UI Semibold", "fontSize": 12, "color": "#1E3A8A"},
+    "header": {"fontFace": "Segoe UI Semibold", "fontSize": 11, "color": "#1E293B"},
+    "label": {"fontFace": "Segoe UI", "fontSize": 10, "color": "#475569"}
+  },
+  "visualStyles": {
+    "*": {
+      "*": {
+        "background": [{"show": true, "color": {"solid": {"color": "#FFFFFF"}}, "transparency": 0}],
+        "border": [{"show": true, "color": {"solid": {"color": "#DCE3EE"}}, "radius": 12}],
+        "dropShadow": [{"show": true, "preset": "BottomRight", "color": {"solid": {"color": "#94A3B8"}}, "transparency": 80}],
+        "title": [{"fontColor": {"solid": {"color": "#1E3A8A"}}, "fontSize": 12, "bold": true}],
+        "subTitle": [{"fontColor": {"solid": {"color": "#64748B"}}, "fontSize": 9}],
+        "visualHeader": [{"show": true}]
+      }
+    },
+    "page": {
+      "*": {
+        "background": [{"color": {"solid": {"color": "#EEF2F9"}}, "transparency": 0}],
+        "outspace": [{"color": {"solid": {"color": "#E2E8F2"}}, "transparency": 0}]
+      }
+    },
+    "tableEx": {
+      "*": {
+        "columnHeaders": [{"backColor": {"solid": {"color": "#1E3A8A"}}, "fontColor": {"solid": {"color": "#FFFFFF"}}, "bold": true}],
+        "values": [{"backColorPrimary": {"solid": {"color": "#FFFFFF"}}, "backColorSecondary": {"solid": {"color": "#F1F5FB"}}}],
+        "total": [{"backColor": {"solid": {"color": "#DBEAFE"}}, "bold": true}]
+      }
+    },
+    "slicer": {
+      "*": {
+        "header": [{"fontColor": {"solid": {"color": "#1E3A8A"}}, "bold": true}]
+      }
+    }
+  }
+}
