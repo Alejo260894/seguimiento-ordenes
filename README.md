@@ -44,6 +44,7 @@ Para abrirla, haz doble clic en el `.exe`. No necesita Python. Tarda unos segund
    - guarda una copia del CSV en `Cargas\` para conservar el historial;
    - actualiza el seguimiento:
      - solo entran las **OC sin factura que están En proceso**. Las Cerradas o Canceladas sin factura ya no se van a facturar y no se tratan;
+     - **excepción, OC de bienes (serie OCB / 26OCB) con fecha de OC desde el 01/09/2026**: «Cerrado» significa que ya tienen **nota de entrada** (se atendieron completas) y solo falta ingresar la factura. Entran al seguimiento y se ven como «Cerrado (nota de entrada)». El requerimiento queda en «Pendiente de factura» y en Power BI aparecen como «Pendiente de factura (nota de entrada)», sin contar como incumplimiento. La fecha de corte está en `seguimiento.py` (`NOTA_ENTRADA_DESDE`);
      - si en el nuevo reporte la OC ya trae factura, se cierra como **Facturada** y deja anotado el N° de factura;
      - si la OC pasa a Cerrada o Cancelada en SAP sin factura, se cierra como **OC cerrada sin factura** u **OC cancelada sin factura**, conservando sus comentarios;
      - si la OC ya no aparece en el reporte, se cierra como **Fuera del reporte**;
