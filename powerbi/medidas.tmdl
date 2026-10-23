@@ -1,0 +1,122 @@
+/// Medidas para el informe de Power BI sobre «Datos Power BI.xlsx».
+/// Uso: Power BI Desktop → vista TMDL (icono «</>» a la izquierda) → pegar todo → Aplicar.
+/// Crea la tabla «Medidas» (solo medidas, agrupadas en carpetas). No modifica las tablas de datos.
+/// Requiere que las tablas se llamen Ordenes, Facturas, Requerimientos, Comentarios e Info.
+createOrReplace
+
+	table Medidas
+
+		measure 'N° OC' = DISTINCTCOUNT(Ordenes[OC])
+			formatString: #,0
+			displayFolder: Órdenes
+
+		measure 'OC en proceso sin factura' = CALCULATE([N° OC], Ordenes[Categoría] = "En proceso sin factura")
+			formatString: #,0
+			displayFolder: Órdenes
+
+		measure 'OC pendientes de pago' = CALCULATE([N° OC], Ordenes[Categoría] = "Pendiente de pago")
+			formatString: #,0
+			displayFolder: Órdenes
+
+		measure 'OC atrasadas' = CALCULATE([N° OC], Ordenes[Plazo OC] = "Atrasado")
+			formatString: #,0
+			displayFolder: Órdenes
+
+		measure 'OC en atención' = CALCULATE([N° OC], Ordenes[Plazo OC] = "Atención")
+			formatString: #,0
+			displayFolder: Órdenes
+
+		measure 'Total OC' = SUM(Ordenes[Total sin IGV])
+			formatString: #,0.00
+			displayFolder: Órdenes
+
+		measure 'Total facturado' = SUM(Ordenes[Facturado sin IGV])
+			formatString: #,0.00
+			displayFolder: Órdenes
+
+		measure '% facturado del total' = DIVIDE([Total facturado], [Total OC])
+			formatString: 0.0%
+			displayFolder: Órdenes
+
+		measure 'N° facturas' = COUNTROWS(Facturas)
+			formatString: #,0
+			displayFolder: Facturas
+
+		measure 'Facturas pendientes' = CALCULATE(COUNTROWS(Facturas), Facturas[Estado factura] = "Pendiente de pago", Facturas[Situación] = "Vigente")
+			formatString: #,0
+			displayFolder: Facturas
+
+		measure 'Facturas vencidas' = CALCULATE(COUNTROWS(Facturas), Facturas[Plazo factura] = "Vencida")
+			formatString: #,0
+			displayFolder: Facturas
+
+		measure 'Facturas por vencer' = CALCULATE(COUNTROWS(Facturas), Facturas[Plazo factura] = "Por vencer")
+			formatString: #,0
+			displayFolder: Facturas
+
+		measure 'Importe pendiente' = CALCULATE(SUM(Facturas[Importe pendiente]), Facturas[Estado factura] = "Pendiente de pago", Facturas[Situación] = "Vigente")
+			formatString: #,0.00
+			displayFolder: Facturas
+
+		measure 'Importe pendiente PEN' = CALCULATE([Importe pendiente], Facturas[Moneda] = "PEN")
+			formatString: #,0.00
+			displayFolder: Facturas
+
+		measure 'Importe pendiente USD' = CALCULATE([Importe pendiente], Facturas[Moneda] = "USD")
+			formatString: #,0.00
+			displayFolder: Facturas
+
+		measure 'Importe vencido' = CALCULATE([Importe pendiente], Facturas[Plazo factura] = "Vencida")
+			formatString: #,0.00
+			displayFolder: Facturas
+
+		measure 'N° requerimientos' = COUNTROWS(Requerimientos)
+			formatString: #,0
+			displayFolder: Requerimientos
+
+		measure 'Req abiertos' = CALCULATE([N° requerimientos], Requerimientos[Abierto / cerrado] = "Abierto")
+			formatString: #,0
+			displayFolder: Requerimientos
+
+		measure 'Req hasta envío de OC' = CALCULATE([Req abiertos], Requerimientos[Hasta envío de OC] = "Sí")
+			formatString: #,0
+			displayFolder: Requerimientos
+
+		measure 'Req atrasados' = CALCULATE([N° requerimientos], Requerimientos[Plazo] = "Atrasado")
+			formatString: #,0
+			displayFolder: Requerimientos
+
+		measure 'Req en atención' = CALCULATE([N° requerimientos], Requerimientos[Plazo] = "Atención")
+			formatString: #,0
+			displayFolder: Requerimientos
+
+		measure 'Días promedio en la etapa' = CALCULATE(AVERAGE(Requerimientos[Días en la etapa]), Requerimientos[Abierto / cerrado] = "Abierto")
+			formatString: 0.0
+			displayFolder: Tiempos
+
+		measure 'Días solicitud → envío de OC' = AVERAGE(Requerimientos[Días: Solicitud → Envío de OC (total)])
+			formatString: 0.0
+			displayFolder: Tiempos
+
+		measure 'Días solicitud → pago' = AVERAGE(Requerimientos[Días: Solicitud → Pago (total)])
+			formatString: 0.0
+			displayFolder: Tiempos
+
+		measure 'Días envío de OC → factura' = AVERAGE(Requerimientos[Días: Envío de OC → Recepción de factura])
+			formatString: 0.0
+			displayFolder: Tiempos
+
+		measure 'Datos al' = "Reporte SAP del " & FORMAT(LOOKUPVALUE(Info[Fecha], Info[Dato], "Reporte SAP"), "dd/mm/yyyy hh:mm")
+
+		column Value
+			dataType: int64
+			isHidden
+			formatString: 0
+			summarizeBy: none
+			isNameInferred
+			sourceColumn: [Value]
+
+		partition Medidas = calculated
+			mode: import
+			source = {0}
+
