@@ -138,6 +138,14 @@ El nombre exacto de cada columna «Días: …» se ve en la tabla Requerimientos
 - **Tiempos del flujo**: promedio de cada columna «Días: …» por Tipo o Controller.
 - Una tabla de las OC «En proceso sin factura» con Días desde la OC, Responsable y Último comentario.
 
+**Informe listo (`powerbi\Seguimiento.pbip`):**
+- Las medidas están en `powerbi\medidas.tmdl`. Se pegan en la vista TMDL de Power BI y se pulsa Aplicar.
+- Las páginas **Resumen, Facturas, Requerimientos y Tiempos** se generan con `python powerbi\generar_paginas.py`, **con Power BI cerrado**.
+  - El script revisa que cada campo exista en el modelo antes de escribir.
+  - Si vuelves a ejecutarlo, regenera esas 4 páginas y no toca las que crees a mano.
+- En el modelo, los montos son decimales con formato `#,0.00`, las fechas usan `dd/mm/yyyy` y las columnas «Mes …» usan `mmm yyyy`.
+- El proyecto de Power BI no se sube a Git: tiene rutas locales y una caché con datos.
+
 Para publicarlo en Power BI Service y compartirlo hace falta una licencia Pro. Como el archivo está en OneDrive, la actualización programada se puede configurar conectando por la ruta de SharePoint o OneDrive.
 
 ### Dos compradores en la misma base

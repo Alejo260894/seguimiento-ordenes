@@ -21,3 +21,9 @@ dist/
 __pycache__/
 *.pyc
 .venv/
+
+# Proyecto de Power BI: queda local (rutas propias y caché con datos de la empresa).
+# Se versionan powerbi/medidas.tmdl y powerbi/generar_paginas.py
+powerbi/*.pbip
+powerbi/*.Report/
+powerbi/*.SemanticModel/
