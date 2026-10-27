@@ -134,6 +134,7 @@ def _agregar_columna(con, tabla, columna, tipo):
 def preparar(con):
     con.executescript(SCHEMA)
     _agregar_columna(con, "sap_fact", "monto", "REAL")               # FT Sin Imp. de cada factura
+    _agregar_columna(con, "sap_fact", "pendiente", "REAL")           # Imp. Pendiente (saldo por pagar)
     _agregar_columna(con, "req", "manual", "TEXT DEFAULT '[]'")      # campos que el usuario vació a propósito
     _agregar_columna(con, "sap_oc", "serie", "TEXT DEFAULT ''")      # OCB/OCS: excepción de nota de entrada
     for col, tipo in (("tipo_oc", "TEXT"), ("estado_logistico", "TEXT"), ("ingresado", "INTEGER"), ("fecha_entrada", "TEXT"),
@@ -342,10 +343,10 @@ def guardar_snapshot_sap(con, df):
     detalle_sap.enlazar(con)               # estado logístico del último reporte de detalle
     con.execute("DELETE FROM sap_fact")
     fx = df[df["N° Factura"] != ""]
-    con.executemany("INSERT INTO sap_fact(numero_oc, n_factura, estado, contab, emision, fecha_pago, monto) "
-                    "VALUES (?,?,?,?,?,?,?)", [
+    con.executemany("INSERT INTO sap_fact(numero_oc, n_factura, estado, contab, emision, fecha_pago, monto, pendiente) "
+                    "VALUES (?,?,?,?,?,?,?,?)", [
         (int(r["Numero OC"]), r["N° Factura"], r["Estado Factura"], _iso(r["Contab. FT"]), _iso(r["Emisión FT"]),
-         _iso(r["Fecha Pago"]), _num(r["FT Sin Imp."])) for _, r in fx.iterrows()])
+         _iso(r["Fecha Pago"]), _num(r["FT Sin Imp."]), _num(r["Imp. Pendiente"])) for _, r in fx.iterrows()])
     con.commit()
 
 
@@ -370,10 +371,13 @@ def datos_sap(con, orden):
         contab = [f["contab"] for f in fac if f["contab"]]
         if contab:
             d["recepcion_fact"] = min(contab)
-        pagadas = [f for f in fac if f["estado"] == "Pagado" and f["fecha_pago"]]
+        # Pagada: estado Pagado, o un saldo menor que es solo diferencia de montos
+        saldada = lambda f: f["estado"] == "Pagado" or (f.get("pendiente") is not None and f["pendiente"] <= SALDO_MENOR)
+        pagadas = [f for f in fac if saldada(f) and f["fecha_pago"]]
         facturado = sum(f["monto"] or 0 for f in fac)
         # «Cerrado» con nota de entrada solo dice que se recibió todo: para estar completa debe estar facturada
-        completa = oc["estado"] == "Cerrado" and not nota or bool(oc["total"]) and facturado >= 0.995 * oc["total"]
+        completa = oc["estado"] == "Cerrado" and not nota or bool(oc["total"]) and (
+            facturado >= 0.995 * oc["total"] or oc["total"] - facturado <= SALDO_MENOR)
         # Fecha de pago: todas las facturas pagadas Y la orden cerrada o facturada al 100 % (si no, es un pago parcial)
         if len(pagadas) == len(fac) and completa:
             d["fecha_pago"] = max(f["fecha_pago"] for f in pagadas)
@@ -399,6 +403,8 @@ CAMPOS_SAP = ["emision_oc", "aprob_oc", "proveedor", "monto", "moneda", "num_fac
 # Vinculados: si la orden está en SAP, SAP manda siempre (lo aprobado en SAP es lo correcto).
 # Excepción: el monto de una OC que comparten varios requerimientos (el total SAP es de la orden completa).
 CAMPOS_VINCULADOS = ["monto", "moneda"]
+# Saldo (en la moneda de la OC / factura) que se considera diferencia de montos y no un pendiente real
+SALDO_MENOR = 10.0
 
 
 def _distinto(campo, a, b):
@@ -604,6 +610,79 @@ def listar(con):
     return filas
 
 
+STATUS_RESUMEN = ["Completado", "Pendiente de pago", "Facturación parcial", "Pendiente de factura", "Sin OC (en trámite)",
+                  "OC no está en SAP", "Anulada"]
+
+
+def estado_pago(con, orden):
+    """Status de pago de una OC según SAP: (status, detalle, cifras).
+    «Completado» = nada pendiente de pago: facturas pagadas (o saldo menor por diferencia de montos), o la OC se
+    cerró sin factura (salvo que tenga nota de entrada: ahí falta la factura)."""
+    oc = con.execute("SELECT * FROM sap_oc WHERE numero_oc=?", (int(orden),)).fetchone()
+    if oc is None:
+        return "OC no está en SAP", "La orden no aparece en el último reporte «Control de órdenes»", {}
+    fac = [dict(r) for r in con.execute(
+        "SELECT * FROM facturas WHERE numero_oc=? AND situacion='Vigente' ORDER BY emision", (int(orden),))]
+    mon, total = MON_SAP.get(oc["mon"], oc["mon"]), oc["total"] or 0
+    facturado = sum(f["ft_sin_imp"] or 0 for f in fac)
+    saldo = sum(max(f["imp_pendiente"] or 0, 0) for f in fac if f["estado_factura"] != "Pagado")
+    pagos = [f["fecha_pago"] for f in fac if f["fecha_pago"]]
+    cifras = {"moneda": mon, "total": total, "facturado": facturado, "pct": facturado / total if total else None,
+              "saldo": saldo, "ultimo_pago": max(pagos) if pagos else "", "estado_oc": oc["estado"], "n_fact": len(fac),
+              "proveedor": oc["proveedor"], "fecha_oc": oc["fecha"]}
+    nota = sgm.con_nota_entrada(oc["serie"], oc["estado"], oc["fecha"], oc["ingresado"])
+    if oc["estado"] == "Cancelado":
+        return "Anulada", "OC cancelada en SAP", cifras
+    if saldo > SALDO_MENOR:
+        hoy = date.today().isoformat()
+        pend = [f for f in fac if f["estado_factura"] != "Pagado" and (f["imp_pendiente"] or 0) > SALDO_MENOR]
+        venc = [f for f in pend if f["vencimiento"] and f["vencimiento"] < hoy]
+        prox = min((f["vencimiento"] for f in pend if f["vencimiento"] and f["vencimiento"] >= hoy), default="")
+        det = f"{len(pend)} factura{'s' if len(pend) > 1 else ''} por pagar: {mon} {saldo:,.2f}"
+        det += f" · {len(venc)} vencida{'s' if len(venc) > 1 else ''}" if venc else (f" · vence {fmt(prox)}" if prox else "")
+        return "Pendiente de pago", det, cifras
+    if not fac:
+        if oc["estado"] == "Cerrado" and not nota:
+            return "Completado", "OC cerrada sin factura: no hay nada por pagar", cifras
+        return "Pendiente de factura", ("Material ingresado (nota de entrada); falta la factura" if nota
+                                        else "OC en proceso, aún sin factura"), cifras
+    por_facturar = total - facturado
+    if (oc["estado"] != "Cerrado" or nota) and por_facturar > SALDO_MENOR and facturado < 0.995 * total:
+        return "Facturación parcial", (f"Facturado {facturado / total:.0%}; falta facturar {mon} {por_facturar:,.2f} "
+                                       f"(lo facturado está pagado)"), cifras
+    det = (f"{len(fac)} factura{'s' if len(fac) > 1 else ''} pagada{'s' if len(fac) > 1 else ''}"
+           + (f" · último pago {fmt(max(pagos))}" if pagos else ""))
+    if saldo > 0.005:
+        det += f" · saldo menor {mon} {saldo:,.2f} (diferencia de montos)"
+    if oc["estado"] == "Cerrado" and abs(por_facturar) > 0.005 and facturado < 0.995 * total:
+        det += f" · OC cerrada con {mon} {por_facturar:,.2f} sin facturar"
+    return "Completado", det, cifras
+
+
+# Tipos que no entran en el resumen (los vuelos no pasan por OC y su seguimiento no es relevante aquí)
+TIPOS_FUERA_RESUMEN = ("VUELO",)
+
+
+def resumen_sap(con, filas):
+    """Filas del resumen (una por requerimiento, sin vuelos) con lo que dice SAP y su status de pago."""
+    salida = []
+    for f in filas:
+        if (f["tipo"] or "").upper() in TIPOS_FUERA_RESUMEN:
+            continue
+        if not f["orden"] and f["etapa"] == "Anulado":
+            st, det, c = "Anulada", "Anulado en el control (sin OC)", {}
+        elif not f["orden"] and f["etapa"] in CERRADAS:
+            st, det, c = "Completado", f"Sin OC en SAP ({f['tipo'] or 'sin tipo'}); cerrado en el control: {f['etapa']}", {}
+        elif not f["orden"]:
+            st, det, c = "Sin OC (en trámite)", f"Etapa: {f['etapa']}", {}
+        else:
+            st, det, c = estado_pago(con, f["orden"])
+        salida.append({**c, "id": f["id"], "proyecto": f["proyecto"], "orden": f["orden"], "status": st, "detalle": det,
+                       "proveedor": c.get("proveedor") or f["proveedor"], "moneda": c.get("moneda") or f["moneda"],
+                       "total": c.get("total", f["monto"])})
+    return salida
+
+
 def dias_entre(a, b):
     if not a or not b:
         return None
@@ -635,6 +714,55 @@ def indicadores(filas):
 # ---------------------------------------------------------------------------
 # Exportación a Excel
 # ---------------------------------------------------------------------------
+COLORES_STATUS = {"Completado": "#C6EFCE", "Pendiente de pago": "#FFC7CE", "Facturación parcial": "#FFEB9C",
+                  "Pendiente de factura": "#FFEB9C", "Sin OC (en trámite)": "#DDEBF7", "OC no está en SAP": "#EDEDED",
+                  "Anulada": "#EDEDED"}
+
+
+def _hoja_resumen(wb, F, hdr, titulo, sub, filas):
+    """Hoja RESUMEN: una fila por requerimiento con solo datos de SAP y el status de pago."""
+    ws = wb.add_worksheet("RESUMEN")
+    ws.hide_gridlines(2)
+    ws.write("A1", "Resumen de requerimientos según SAP", titulo)
+    ws.write("A2", f"«Completado» = sin pendientes de pago: facturas pagadas (saldos de hasta {SALDO_MENOR:,.0f} se toman "
+                   f"como diferencia de montos) u OC cerrada sin factura. DÍAS = antigüedad de la OC en lo pendiente. "
+                   f"No incluye vuelos. Datos del último reporte SAP cargado.", sub)
+    cuenta = {}
+    for f in filas:
+        cuenta[f["status"]] = cuenta.get(f["status"], 0) + 1
+    saldos = {}
+    for f in filas:
+        if f["status"] == "Pendiente de pago":
+            saldos[f["moneda"]] = saldos.get(f["moneda"], 0) + f["saldo"]
+    ws.write("A3", "  ·  ".join(f"{s}: {cuenta[s]}" for s in STATUS_RESUMEN if s in cuenta)
+             + ("   |   Por pagar: " + "  ·  ".join(f"{m} {v:,.2f}" for m, v in sorted(saldos.items())) if saldos else ""),
+             F(bold=True, font_color="#1F3864"))
+    cols = ["COD", "PROYECTO", "PROVEEDOR", "ORDEN", "FECHA OC", "DÍAS", "ESTADO OC", "MONEDA", "MONTO OC", "FACTURADO",
+            "% FACTURADO", "SALDO POR PAGAR", "ÚLTIMO PAGO", "STATUS", "DETALLE"]
+    orden = {s: i for i, s in enumerate(STATUS_RESUMEN)}
+    filas = sorted(filas, key=lambda f: (orden.get(f["status"], 9), -(f["saldo"] if f.get("saldo") else 0), f["id"]))
+    fecha = lambda iso: datetime.strptime(iso, "%Y-%m-%d") if iso else None
+    dias = lambda f: ((date.today() - fecha(f["fecha_oc"]).date()).days
+                      if f.get("fecha_oc") and f["status"] not in ("Completado", "Anulada") else None)
+    datos = [[f["id"], f["proyecto"] or None, f["proveedor"] or None, f["orden"], fecha(f.get("fecha_oc")), dias(f),
+              f.get("estado_oc") or None, f["moneda"] or None, f["total"], f.get("facturado"), f.get("pct"),
+              f.get("saldo") if f.get("saldo") else None, fecha(f.get("ultimo_pago")), f["status"], f["detalle"]]
+             for f in filas]
+    fd, fm, fp = F(num_format="dd/mm/yyyy"), F(num_format="#,##0.00"), F(num_format="0%")
+    formatos = {"FECHA OC": fd, "ÚLTIMO PAGO": fd, "MONTO OC": fm, "FACTURADO": fm, "SALDO POR PAGAR": fm, "% FACTURADO": fp}
+    ws.add_table(4, 0, 4 + max(len(datos), 1), len(cols) - 1, {
+        "name": "Resumen", "data": datos, "style": "Table Style Light 9",
+        "columns": [{"header": c, "header_format": hdr, **({"format": formatos[c]} if c in formatos else {})} for c in cols]})
+    anchos = [6, 11, 38, 11, 11, 6, 11, 8, 13, 13, 10, 14, 11, 20, 62]
+    for i, w in enumerate(anchos):
+        ws.set_column(i, i, w)
+    col_st = cols.index("STATUS")
+    for st, color in COLORES_STATUS.items():
+        ws.conditional_format(5, col_st, 4 + max(len(datos), 1), col_st,
+                              {"type": "cell", "criteria": "==", "value": f'"{st}"', "format": F(bg_color=color, bold=True)})
+    ws.freeze_panes(5, 1)
+
+
 def exportar_excel(con, salida, plazos=None, comprador=None):
     """Genera el Excel de seguimiento. Si `salida` está abierto en Excel, guarda una copia con la hora.
     `plazos`: {id: 'Atrasado' | 'Atención' | 'En plazo'} del semáforo (columna PLAZO).
@@ -652,6 +780,7 @@ def exportar_excel(con, salida, plazos=None, comprador=None):
     grp = F(bold=True, font_color="white", bg_color="#2F5597", align="center")
     fd, fm, fsap = F(num_format="dd/mm/yyyy"), F(num_format="#,##0.00"), F(num_format="dd/mm/yyyy", font_color="#2F5597", italic=True)
     titulo, sub = F(bold=True, font_size=14), F(font_color="#595959")
+    _hoja_resumen(wb, F, hdr, titulo, sub, resumen_sap(con, filas))
 
     # --- CONTROL (mismas columnas que el Excel original + etapa y tiempos)
     ws = wb.add_worksheet("CONTROL")

@@ -23,7 +23,15 @@ Reemplaza el llenado manual del Excel «SEGUIMIENTO DE REQUERIMIENTOS Y ORDENES�
   - tiempos del flujo por tramo (N°, promedio, mediana, máximo).
 
   Se pueden filtrar por tipo, controller y rango de meses. Los días negativos (anticipos o regularizaciones: la fecha es anterior a la orden) no entran en los promedios y se cuentan aparte.
-- **📤 Exportar Excel** genera `Seguimiento requerimientos DD_MM.xlsx` con tres hojas:
+- **📤 Exportar Excel** genera `Seguimiento requerimientos DD_MM.xlsx`. La primera hoja es **RESUMEN**:
+  - Tiene 15 columnas, todas de SAP: OC, fecha, días de antigüedad, estado OC, moneda, monto, facturado, % facturado, saldo por pagar, último pago, **STATUS** y detalle.
+  - No incluye vuelos.
+  - **STATUS = Completado** cuando la OC ya no tiene pendientes de pago:
+    - facturas pagadas; un saldo de hasta 10 en la moneda de la OC (`SALDO_MENOR`) se toma como diferencia de montos;
+    - u OC cerrada sin factura, salvo que tenga nota de entrada.
+  - Los demás status son Pendiente de pago (con vencimiento), Facturación parcial, Pendiente de factura, Sin OC (en trámite), OC no está en SAP y Anulada.
+
+  Además trae tres hojas de detalle:
   - **CONTROL**: tus mismas columnas, más etapa, días, estado de la OC en SAP y último comentario de la OC;
   - **PENDIENTES**;
   - **TIEMPOS**: con fórmulas sobre la tabla.
