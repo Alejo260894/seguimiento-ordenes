@@ -23,6 +23,14 @@ Reemplaza el llenado manual del Excel «SEGUIMIENTO DE REQUERIMIENTOS Y ORDENES�
   - tiempos del flujo por tramo (N°, promedio, mediana, máximo).
 
   Se pueden filtrar por tipo, controller y rango de meses. Los días negativos (anticipos o regularizaciones: la fecha es anterior a la orden) no entran en los promedios y se cuentan aparte.
+- **📊 Resumen ejecutivo** (en Requerimientos e Indicadores) genera aparte `Resumen seguimiento DD_MM.xlsx`, del comprador elegido y sin vuelos:
+  - **Panel**:
+    - filtros en celdas amarillas (status, también «Pendientes (todo lo no completado)»; moneda; comprador; proyecto; antigüedad) y un buscador por OC, COD, proveedor o texto;
+    - 8 indicadores y 4 gráficos (por status, por antigüedad, monto pendiente PEN/USD y top 10 de proveedores con pendientes), que se recalculan con cada filtro;
+    - una ficha **«Explicar una orden o requerimiento»**: escribes el N° de OC o el COD y muestra su status explicado en una frase, con todos sus datos;
+    - el listado filtrado, con lo pendiente primero.
+  - **Datos**: la tabla completa con los filtros propios de Excel.
+  - Usa fórmulas de Excel 365.
 - **📤 Exportar Excel** genera `Seguimiento requerimientos DD_MM.xlsx`. La primera hoja es **RESUMEN**:
   - Tiene 15 columnas, todas de SAP: OC, fecha, días de antigüedad, estado OC, moneda, monto, facturado, % facturado, saldo por pagar, último pago, **STATUS** y detalle.
   - No incluye vuelos.

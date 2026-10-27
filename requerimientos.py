@@ -629,7 +629,12 @@ def estado_pago(con, orden):
     pagos = [f["fecha_pago"] for f in fac if f["fecha_pago"]]
     cifras = {"moneda": mon, "total": total, "facturado": facturado, "pct": facturado / total if total else None,
               "saldo": saldo, "ultimo_pago": max(pagos) if pagos else "", "estado_oc": oc["estado"], "n_fact": len(fac),
-              "proveedor": oc["proveedor"], "fecha_oc": oc["fecha"]}
+              "proveedor": oc["proveedor"], "fecha_oc": oc["fecha"], "vence": "", "vencidas": 0}
+    hoy = date.today().isoformat()
+    pend = [f for f in fac if f["estado_factura"] != "Pagado" and (f["imp_pendiente"] or 0) > SALDO_MENOR]
+    if pend:
+        cifras["vence"] = min((f["vencimiento"] for f in pend if f["vencimiento"]), default="")
+        cifras["vencidas"] = sum(1 for f in pend if f["vencimiento"] and f["vencimiento"] < hoy)
     nota = sgm.con_nota_entrada(oc["serie"], oc["estado"], oc["fecha"], oc["ingresado"])
     if oc["estado"] == "Cancelado":
         return "Anulada", "OC cancelada en SAP", cifras
@@ -677,9 +682,15 @@ def resumen_sap(con, filas):
             st, det, c = "Sin OC (en trámite)", f"Etapa: {f['etapa']}", {}
         else:
             st, det, c = estado_pago(con, f["orden"])
+        total = c.get("total", f["monto"]) or 0
+        # Lo que falta: por pagar (pendiente de pago), por facturar (parcial) o la OC completa (sin factura)
+        pendiente = (c.get("saldo", 0) if st == "Pendiente de pago" else
+                     max(total - c.get("facturado", 0), 0) if st == "Facturación parcial" else
+                     total if st == "Pendiente de factura" else 0)
         salida.append({**c, "id": f["id"], "proyecto": f["proyecto"], "orden": f["orden"], "status": st, "detalle": det,
                        "proveedor": c.get("proveedor") or f["proveedor"], "moneda": c.get("moneda") or f["moneda"],
-                       "total": c.get("total", f["monto"])})
+                       "total": total, "pendiente": pendiente, "tipo": f["tipo"], "referencia": f["referencia"],
+                       "comprador": f["comprador"], "etapa": f["etapa"]})
     return salida
 
 

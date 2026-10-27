@@ -10,6 +10,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 import requerimientos as rq
+import resumen_excel
 import semaforo as sem
 
 COLS_REQ = [("id", "COD", 50, "e"), ("f_solic", "F. Solic.", 80, "center"), ("proyecto", "Proyecto", 80, "w"),
@@ -489,6 +490,8 @@ def construir(app, tab_req, tab_ind):
     ttk.Button(barra, text="➕  Nuevo requerimiento", style="Accent.TButton", command=lambda: EditorReq(app)).pack(side="left")
     ttk.Button(barra, text="✏  Editar", command=lambda: editar(app)).pack(side="left", padx=6)
     ttk.Button(barra, text="📤  Exportar Excel", command=lambda: exportar(app)).pack(side="left")
+    ttk.Button(barra, text="📊  Resumen ejecutivo", style="Accent.TButton",
+               command=lambda: exportar_resumen(app)).pack(side="left", padx=(6, 0))
     ttk.Button(barra, text="📚  Actualizar catálogos", command=lambda: catalogos(app)).pack(side="left", padx=6)
     ttk.Button(barra, text="📥  Importar desde Excel…", command=lambda: importar(app)).pack(side="left", padx=(0, 18))
     app.vr_comprador = app._combo(barra, "Comprador:", ["Todos"], 20, lambda: pintar_req(app))
@@ -526,6 +529,7 @@ def construir(app, tab_req, tab_ind):
     app.vi_controller = app._combo(fi, "Controller:", ["Todos"], 26, lambda: pintar_ind(app))
     ttk.Button(fi, text="📤  Exportar Excel", command=lambda: exportar(app)).pack(side="right")
     ttk.Button(fi, text="📈  Datos para Power BI", command=app.exportar_powerbi).pack(side="right", padx=6)
+    ttk.Button(fi, text="📊  Resumen ejecutivo", command=lambda: exportar_resumen(app)).pack(side="right")
     ttk.Label(tab_ind, text="Pendientes por etapa (las etapas resaltadas son el seguimiento hasta el envío de la OC)",
               font=("Segoe UI", 10, "bold"), padding=(6, 4)).pack(fill="x")
     app.tree_pend = ttk.Treeview(tab_ind, columns=("etapa", "n", "rojo", "amarillo", "prom", "max", "pen", "usd"),
@@ -757,6 +761,19 @@ def importar(app):
         texto += f"\n\n{len(avisos)} fechas no se pudieron leer y quedaron vacías:\n• " + "\n• ".join(avisos[:10])
         texto += "\n…" if len(avisos) > 10 else ""
     messagebox.showinfo("Importar", texto, parent=app)
+
+
+def exportar_resumen(app):
+    """«Resumen seguimiento …xlsx»: panel con filtros, gráficos, ficha por OC/COD y listado (sin vuelos)."""
+    comp = app.vr_comprador.get()
+    comp = None if comp == "Todos" else comp
+    nombre = f"Resumen seguimiento{' ' + comp if comp else ''} {date.today():%d_%m}.xlsx"
+    salida = resumen_excel.exportar(app.con, os.path.join(app_base(app), nombre), comp)
+    if messagebox.askyesno("Resumen ejecutivo",
+                           f"Se generó {os.path.basename(salida)}.\n\nEn la hoja «Panel» elige los filtros en las celdas "
+                           f"amarillas o escribe un N° de OC o COD para ver su explicación.\n\n¿Abrirlo en Excel?",
+                           parent=app):
+        os.startfile(salida)
 
 
 def exportar(app):
