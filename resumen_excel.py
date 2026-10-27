@@ -34,12 +34,15 @@ COLUMNAS = [("COD", "id", "int"), ("TIPO", "tipo", "txt"), ("PROYECTO", "proyect
             ("FACTURADO", "facturado", "num"), ("% FACTURADO", "pct", "pct"), ("SALDO POR PAGAR", "saldo", "num"),
             ("MONTO PENDIENTE", "pendiente", "num"), ("PRÓX. VENCIMIENTO", "vence", "fecha"),
             ("ÚLTIMO PAGO", "ultimo_pago", "fecha"), ("STATUS", "status", "txt"), ("DETALLE", "detalle", "txt"),
+            ("NOTAS SOLPED", "notas", "txt"), ("SEGUIMIENTO OC", "seguimiento", "txt"),
+            ("ÚLTIMO COMENTARIO", "ult_com", "txt"), ("COMENTARIOS", "comentarios", "txt"),
             ("PENDIENTE", "es_pendiente", "int"), ("PRIORIDAD", "prioridad", "int")]
 POS = {c[0]: i for i, c in enumerate(COLUMNAS)}
-LISTADO = ["COD", "ORDEN", "PROVEEDOR", "STATUS", "MONEDA", "MONTO PENDIENTE", "DÍAS", "PRÓX. VENCIMIENTO", "DETALLE"]
+LISTADO = ["COD", "ORDEN", "PROVEEDOR", "STATUS", "MONEDA", "MONTO PENDIENTE", "DÍAS", "PRÓX. VENCIMIENTO",
+           "ÚLTIMO COMENTARIO", "DETALLE"]
 FICHA = ["COD", "TIPO", "PROYECTO", "REFERENCIA", "PROVEEDOR", "COMPRADOR", "ORDEN", "FECHA OC", "DÍAS", "ESTADO OC",
          "MONEDA", "MONTO OC", "FACTURADO", "% FACTURADO", "SALDO POR PAGAR", "PRÓX. VENCIMIENTO", "ÚLTIMO PAGO",
-         "STATUS", "DETALLE"]
+         "STATUS", "DETALLE", "SEGUIMIENTO OC", "NOTAS SOLPED", "ÚLTIMO COMENTARIO", "COMENTARIOS"]
 
 
 def _fecha(iso):
@@ -50,8 +53,28 @@ def filas_resumen(con, comprador=None):
     """Filas del resumen (sin vuelos) con días de antigüedad, prioridad y marca de pendiente."""
     reqs = [f for f in rq.listar(con) if comprador is None or f["comprador"] == comprador]
     orden = {s: i for i, s in enumerate(PENDIENTES + ["Completado", "Anulada"])}     # lo pendiente primero
+    notas = {f["id"]: f["notas"] for f in reqs}
+    # Comentarios de la OC (se hacen en «OC sin factura», «Facturas» o «Consultar OC»): más reciente primero
+    comentarios = {}
+    for c in con.execute("SELECT numero_oc, fecha, autor, texto FROM comentarios WHERE tipo='usuario' "
+                         "ORDER BY fecha DESC, id DESC"):
+        comentarios.setdefault(c["numero_oc"], []).append(
+            f"{c['fecha'][8:10]}/{c['fecha'][5:7]}/{c['fecha'][:4]} {c['autor']}: {' '.join(c['texto'].split())}")
+    seguimiento = {}
+    for o in con.execute("SELECT * FROM ordenes WHERE situacion='Activa'"):
+        partes = [o["estado_seg"]]
+        if o["responsable"]:
+            partes.append(f"responsable {o['responsable']}")
+        if o["fecha_compromiso"]:
+            partes.append(f"compromiso {o['fecha_compromiso'][8:10]}/{o['fecha_compromiso'][5:7]}/{o['fecha_compromiso'][:4]}")
+        seguimiento[o["numero_oc"]] = " · ".join(partes)
     salida = []
     for r in rq.resumen_sap(con, reqs):
+        com = comentarios.get(r["orden"], []) if r["orden"] else []
+        r["notas"] = " ".join((notas.get(r["id"]) or "").split())
+        r["ult_com"] = com[0] if com else ""
+        r["comentarios"] = " | ".join(com)
+        r["seguimiento"] = seguimiento.get(r["orden"], "") if r["orden"] else ""
         r["es_pendiente"] = int(r["status"] in PENDIENTES)
         r["prioridad"] = orden.get(r["status"], 9) + 1
         r["dias"] = ((date.today() - _fecha(r["fecha_oc"]).date()).days
@@ -103,14 +126,15 @@ def exportar(con, salida, comprador=None):
                "OR(Panel!$F$5=\"Todos\",AND(ISNUMBER([@DÍAS]),OR("
                + ",".join(f"AND(Panel!$F$5=\"{n}\",[@DÍAS]>={lo},[@DÍAS]<={hi})" for n, lo, hi in ANTIGUEDAD) + "))),"
                "OR(Panel!$G$5=\"\",ISNUMBER(SEARCH(Panel!$G$5,[@COD]&\" \"&[@ORDEN]&\" \"&[@PROVEEDOR]&\" \"&[@REFERENCIA]"
-               "&\" \"&[@PROYECTO]&\" \"&[@DETALLE])))),1,0)")
+               "&\" \"&[@PROYECTO]&\" \"&[@DETALLE]&\" \"&[@[NOTAS SOLPED]]&\" \"&[@COMENTARIOS])))),1,0)")
     formatos = {"fecha": fd, "num": fm, "pct": fp}
     cols = [{"header": h, "header_format": hdr, **({"format": formatos[t]} if t in formatos else {})} for h, _, t in COLUMNAS]
     cols.append({"header": "VISIBLE", "header_format": hdr, "formula": visible})
     n = max(len(cuerpo), 1)
     datos.add_table(0, 0, n, len(cols) - 1, {"name": "Datos", "data": cuerpo, "columns": cols,
                                              "style": "Table Style Light 9"})
-    anchos = {"PROVEEDOR": 36, "DETALLE": 70, "REFERENCIA": 18, "COMPRADOR": 18, "STATUS": 22}
+    anchos = {"PROVEEDOR": 36, "DETALLE": 70, "REFERENCIA": 18, "COMPRADOR": 18, "STATUS": 22, "NOTAS SOLPED": 30,
+              "SEGUIMIENTO OC": 30, "ÚLTIMO COMENTARIO": 50, "COMENTARIOS": 80}
     for i, (h, _, t) in enumerate(COLUMNAS):
         datos.set_column(i, i, anchos.get(h, 12 if t in ("fecha", "num") else 10))
     datos.freeze_panes(1, 1)
@@ -153,7 +177,7 @@ def exportar(con, salida, comprador=None):
     panel.set_column(0, 0, 2)
     panel.set_column(1, 8, 17)
     panel.set_column(9, 9, 2)
-    panel.set_column(10, 10, 20)
+    panel.set_column(10, 10, 40)
     panel.set_column(11, 11, 62)
     banda = F(bold=True, font_size=18, font_color="white", bg_color=AZUL, valign="vcenter")
     panel.set_row(0, 34)
@@ -238,7 +262,10 @@ def exportar(con, salida, comprador=None):
     explic = ('=IF($L$5="","Escribe un N° de OC o un COD en la celda amarilla.",IFERROR('
               '"COD "&INDEX(Datos[COD],' + fila_match + ')&IF(INDEX(Datos[ORDEN],' + fila_match + ')="",""," · OC "&'
               'INDEX(Datos[ORDEN],' + fila_match + '))&" · "&INDEX(Datos[PROVEEDOR],' + fila_match + ')&": "&'
-              'UPPER(INDEX(Datos[STATUS],' + fila_match + '))&". "&INDEX(Datos[DETALLE],' + fila_match + '),'
+              'UPPER(INDEX(Datos[STATUS],' + fila_match + '))&". "&INDEX(Datos[DETALLE],' + fila_match + ')&'
+              'IF(INDEX(Datos[ÚLTIMO COMENTARIO],' + fila_match + ')="",""," · Último comentario: "&'
+              'INDEX(Datos[ÚLTIMO COMENTARIO],' + fila_match + '))&'
+              'IF(INDEX(Datos[NOTAS SOLPED],' + fila_match + ')="",""," · Nota SOLPED: "&INDEX(Datos[NOTAS SOLPED],' + fila_match + ')),'
               '"No se encontró: revisa el número (las OC sin aprobación y los vuelos no están en el resumen)."))')
     panel.write_formula(5, 11, explic, F(text_wrap=True, valign="top", bold=True, font_color="#0F172A"))
     panel.set_row(5, 64)
@@ -263,16 +290,18 @@ def exportar(con, salida, comprador=None):
                       F(bold=True, font_color="white", bg_color=AZUL))
     columnas_lis = [POS[c] + 1 for c in LISTADO]
     for j, c in enumerate(LISTADO):
-        panel.write(fila_lis - 1, 1 + j if j < 8 else 11, c, hdr)
+        panel.write(fila_lis - 1, 1 + j if j < 8 else 2 + j, c, hdr)
     vis = "Datos[VISIBLE]=1"
     # En el archivo la tabla completa se escribe Datos[#Data] (Excel la muestra como «Datos»)
     sel = f'INDEX(Datos[#Data],_xlfn.SEQUENCE(ROWS(Datos[#Data])),{{{",".join(str(c) for c in columnas_lis[:8])}}})'
     formula = (f'=IFERROR(_xlfn.SORTBY(_xlfn._xlws.FILTER({sel},{vis}),_xlfn._xlws.FILTER(Datos[PRIORIDAD],{vis}),1,'
                f'_xlfn._xlws.FILTER(Datos[MONTO PENDIENTE],{vis}),-1),"Sin resultados con estos filtros")')
     panel.write_dynamic_array_formula(fila_lis, 1, fila_lis, 1, formula)
-    formula_det = (f'=IFERROR(_xlfn.SORTBY(_xlfn._xlws.FILTER(Datos[DETALLE],{vis}),_xlfn._xlws.FILTER(Datos[PRIORIDAD],{vis}),1,'
-                   f'_xlfn._xlws.FILTER(Datos[MONTO PENDIENTE],{vis}),-1),"")')
-    panel.write_dynamic_array_formula(fila_lis, 11, fila_lis, 11, formula_det)
+    # Último comentario (columna K) y detalle (columna L), en el mismo orden que el listado
+    for col, campo in ((10, "ÚLTIMO COMENTARIO"), (11, "DETALLE")):
+        f_txt = (f'=IFERROR(_xlfn.SORTBY(_xlfn._xlws.FILTER(Datos[{campo}],{vis}),_xlfn._xlws.FILTER(Datos[PRIORIDAD],{vis}),1,'
+                 f'_xlfn._xlws.FILTER(Datos[MONTO PENDIENTE],{vis}),-1),"")')
+        panel.write_dynamic_array_formula(fila_lis, col, fila_lis, col, f_txt)
     largo = fila_lis + len(filas) + 2
     for j, c in enumerate(LISTADO[:8]):
         fmt = {"MONTO PENDIENTE": fm, "PRÓX. VENCIMIENTO": fd}.get(c)
