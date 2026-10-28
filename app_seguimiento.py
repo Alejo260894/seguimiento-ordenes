@@ -74,8 +74,12 @@ def ordenar_carpeta():
         destino = (CONTROLES if f.startswith("Control de ordenes ") else
                    EXPORTES if f.startswith(("Seguimiento requerimientos", "Resumen seguimiento")) else None)
         if destino and f.endswith(".xlsx"):
+            origen, final = os.path.join(BASE, f), os.path.join(carpeta(destino), f)
+            if os.path.exists(final):        # ya hay uno con ese nombre (p. ej. regenerado hoy): no se pisa
+                nombre, ext = os.path.splitext(f)
+                final = os.path.join(carpeta(destino), f"{nombre} (anterior {datetime.fromtimestamp(os.path.getmtime(origen)):%d_%m %H%M}){ext}")
             try:
-                os.replace(os.path.join(BASE, f), os.path.join(carpeta(destino), f))
+                os.replace(origen, final)
                 movidos += 1
             except OSError:
                 pass
