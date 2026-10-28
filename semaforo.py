@@ -10,6 +10,7 @@ Los umbrales se guardan en la configuración (config_seguimiento.json, clave «p
 from datetime import date, timedelta
 
 import requerimientos as rq
+import reglas
 import seguimiento as sgm
 
 ROJO, AMARILLO, VERDE = "rojo", "amarillo", "verde"
@@ -70,7 +71,8 @@ def nivel_oc(f, u, hoy=None):
 
 def nivel_factura(f, u, hoy=None):
     """Nivel de una factura (fila de seguimiento.listar_facturas); solo vigentes sin pagar con vencimiento."""
-    if f["situacion"] != sgm.FACT_VIGENTE or f["estado_factura"] == "Pagado" or not f["vencimiento"]:
+    if (f["situacion"] != sgm.FACT_VIGENTE or not f["vencimiento"]
+            or reglas.saldada(f["estado_factura"], f.get("imp_pendiente"), f.get("mon"))):     # pagada o saldo residual
         return None
     hoy = hoy or date.today()
     if f["vencimiento"] < hoy.isoformat():

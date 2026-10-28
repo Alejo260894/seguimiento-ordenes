@@ -20,13 +20,14 @@ import sys
 import unicodedata
 import threading
 import traceback
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
 import detalle_sap
 import powerbi as pbi
+import reglas
 import procesar_sap as ps
 import seguimiento as sgm
 import requerimientos as rq
@@ -34,11 +35,57 @@ import semaforo as sem
 import app_requerimientos as ui_req
 import app_consulta as ui_con
 
-BASE = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+def _carpeta_base():
+    """Carpeta de datos (base, Cargas, Respaldos…). Junto al programa, salvo que un «carpeta_datos.txt» junto al .exe
+    indique otra: así la app puede instalarse en el equipo (arranca más rápido) y usar la base de la carpeta del
+    proyecto o de la red."""
+    if not getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(__file__))
+    junto = os.path.dirname(sys.executable)
+    try:
+        with open(os.path.join(junto, "carpeta_datos.txt"), encoding="utf-8-sig") as fh:
+            ruta = fh.read().strip()
+        if ruta and os.path.isdir(ruta):
+            return ruta
+    except OSError:
+        pass
+    return junto
+
+
+BASE = _carpeta_base()
 DB = os.path.join(BASE, "seguimiento.db")
 CFG_ANTIGUA = os.path.join(BASE, "config_seguimiento.json")        # antes: una sola configuración junto a la app
 CFG = os.path.join(os.environ.get("APPDATA") or BASE, "Seguimiento Ordenes", "config.json")    # una por usuario
 CARGAS = os.path.join(BASE, "Cargas")
+CONTROLES, EXPORTES = "Controles", "Exportes"         # subcarpetas para los Excel generados
+
+
+def carpeta(nombre):
+    """Subcarpeta de la aplicación (se crea si no existe)."""
+    ruta = os.path.join(BASE, nombre)
+    os.makedirs(ruta, exist_ok=True)
+    return ruta
+
+
+def ordenar_carpeta():
+    """Mueve los Excel generados que quedaron sueltos a Controles\\ y Exportes\\ (los abiertos se dejan)."""
+    movidos = 0
+    for f in os.listdir(BASE):
+        destino = (CONTROLES if f.startswith("Control de ordenes ") else
+                   EXPORTES if f.startswith(("Seguimiento requerimientos", "Resumen seguimiento")) else None)
+        if destino and f.endswith(".xlsx"):
+            try:
+                os.replace(os.path.join(BASE, f), os.path.join(carpeta(destino), f))
+                movidos += 1
+            except OSError:
+                pass
+    return movidos
+
+
+def en_onedrive():
+    """¿La carpeta de la aplicación está dentro de OneDrive? (una base compartida ahí pierde cambios)."""
+    raices = [os.environ.get(v) for v in ("OneDrive", "OneDriveCommercial", "OneDriveConsumer")]
+    return any(r and os.path.normcase(BASE).startswith(os.path.normcase(r)) for r in raices)
 DIAS_RESPALDO = 15
 
 SITUACIONES = ["Activas", sgm.SIT_SIN_FACT, sgm.SIT_FACTURADA, sgm.SIT_CERRADA_SAP, sgm.SIT_CANCELADA_SAP,
@@ -56,7 +103,13 @@ COLS_FAC = [("oc", "OC", 85, "e"), ("usuario", "Comprador", 115, "w"), ("proveed
             ("emision", "Emisión", 80, "center"), ("vencimiento", "Vencimiento", 85, "center"),
             ("dias_venc", "Días p/ vencer", 85, "e"), ("plazo", "Plazo", 75, "center"), ("fecha_pago", "Fecha pago", 80, "center"),
             ("estado_oc", "Estado OC", 80, "w"), ("ult_com", "Último comentario (OC)", 300, "w")]
-ESTADOS_FACT_FILTRO = ["Pendiente de pago", "Pagado", "Todos", "(sin estado)"]
+ESTADOS_FACT_FILTRO = ["Pendiente de pago", "Pagado", reglas.RESIDUAL, "Todos", "(sin estado)"]
+# «Pendiente de pago» incluye las pagadas en parte; el saldo residual (diferencia de montos) va aparte
+POR_PAGAR = (reglas.PENDIENTE, reglas.PARCIAL)
+# Acciones rápidas del panel de una OC: (botón, estado de seguimiento, comentario que se registra)
+ACCIONES = [("📨  Pedí la factura", "Solicitada al proveedor", "Se pidió la factura al proveedor."),
+            ("🚚  Factura en camino", "Factura en camino", "El proveedor indica que la factura está en camino."),
+            ("⏳  Esperando conformidad", "Esperando conformidad", "Pendiente de la conformidad del servicio o la entrega.")]
 MONEDAS = ["Todas", "SOL", "USD", "CAD", "AUD", "GBP", "EUR", "ZAR"]
 
 
@@ -161,14 +214,14 @@ def fecha_de(meta, ruta):
 
 def generar_control(df, meta, log, con, fr):
     """Escribe 'Control de ordenes DD_MM.xlsx' con la hoja de seguimiento. Devuelve la ruta."""
-    salida = os.path.join(BASE, f"Control de ordenes {fr:%d_%m}.xlsx")
-    tmp = os.path.join(BASE, f"~tmp_control_{os.getpid()}.xlsx")
+    salida = os.path.join(carpeta(CONTROLES), f"Control de ordenes {fr:%d_%m}.xlsx")
+    tmp = os.path.join(carpeta(CONTROLES), f"~tmp_control_{os.getpid()}.xlsx")
     ps.escribir_libro(df, meta, log, tmp, seguimiento=sgm.tabla_para_excel(con),
                       comentarios_oc=sgm.ultimos_comentarios(con))
     try:
         os.replace(tmp, salida)
     except PermissionError:          # el control está abierto en Excel
-        salida = os.path.join(BASE, f"Control de ordenes {fr:%d_%m} ({datetime.now():%H%M%S}).xlsx")
+        salida = os.path.join(carpeta(CONTROLES), f"Control de ordenes {fr:%d_%m} ({datetime.now():%H%M%S}).xlsx")
         os.replace(tmp, salida)
     return salida
 
@@ -256,6 +309,33 @@ def cargar_detalle(ruta):
         con.close()
 
 
+def detalle_mas_antiguo(ruta):
+    """Texto de aviso si el archivo de detalle es anterior al detalle ya cargado ('' si no)."""
+    con = sgm.conectar(DB)
+    try:
+        u = detalle_sap.ultima_carga(con)
+    finally:
+        con.close()
+    nuevo = datetime.fromtimestamp(os.path.getmtime(ruta)).strftime("%Y-%m-%d %H:%M:%S")
+    if u and u["fecha_archivo"] and nuevo < u["fecha_archivo"]:
+        return (f"El reporte de detalle elegido ({fmt_fecha(nuevo)} {nuevo[11:16]}) es ANTERIOR al que ya está cargado "
+                f"({fmt_fecha(u['fecha_archivo'])} {u['fecha_archivo'][11:16]}).")
+    return ""
+
+
+def aviso_detalle(con):
+    """Aviso si el detalle cargado es más viejo que el último Control (conviene cargar los dos juntos)."""
+    d, c = detalle_sap.ultima_carga(con), sgm.ultima_carga(con)
+    if c is None:
+        return ""
+    if d is None:
+        return "Aún no se cargó el reporte de detalle (notas de entrada, líneas): cárgalo junto con el Control."
+    if d["fecha_archivo"][:10] < c["fecha_reporte"][:10]:
+        return (f"El reporte de detalle es del {fmt_fecha(d['fecha_archivo'])} y el Control del "
+                f"{fmt_fecha(c['fecha_reporte'])}: carga también el detalle para que ingresos y líneas estén al día.")
+    return ""
+
+
 def reaplicar_control():
     """Vuelve a aplicar el último «Control de órdenes» (p. ej. tras cargar solo el detalle), para que el seguimiento
     use el estado logístico nuevo. Devuelve (resultado, ruta_control, log) o None si no hay un Control cargado."""
@@ -315,6 +395,8 @@ class App(tk.Tk):
         self.sash = None                      # altura del panel de detalle al ocultarlo
         self.ultima_carga_id = None
         self.data_version = None             # cambia cuando otro usuario guarda en la base
+        self.db_path = DB
+        self._diferidos = {}
         self._ui()
         self.bind_all("<F5>", lambda e: self.actualizar_vista())
         self.protocol("WM_DELETE_WINDOW", self._cerrar)
@@ -325,10 +407,21 @@ class App(tk.Tk):
     def _inicio(self):
         self._pedir_usuario()
         self._filtros_mios()
+        def respaldo():
+            try:
+                con = self.conexion()
+                try:
+                    respaldo_diario(con)
+                finally:
+                    con.close()
+            except Exception:  # noqa: BLE001
+                registrar_error("Respaldo diario:\n" + traceback.format_exc())
+        threading.Thread(target=respaldo, daemon=True).start()        # no frena la apertura
         try:
-            respaldo_diario(self.con)
+            ordenar_carpeta()
         except Exception:  # noqa: BLE001
-            registrar_error("Respaldo diario:\n" + traceback.format_exc())
+            registrar_error("Ordenar carpeta:\n" + traceback.format_exc())
+        self._aviso_onedrive()
         if self.cfg.get("pendientes_al_abrir", True):
             self.pendientes_de_hoy(auto=True)
 
@@ -341,11 +434,32 @@ class App(tk.Tk):
             registrar_error("Al cerrar:\n" + traceback.format_exc())
         self.destroy()
 
+    def diferir(self, clave, fn, ms=250):
+        """Ejecuta fn cuando se deja de escribir (una búsqueda no repinta la lista en cada tecla)."""
+        if self._diferidos.get(clave):
+            self.after_cancel(self._diferidos[clave])
+        self._diferidos[clave] = self.after(ms, fn)
+
+    def conexion(self):
+        """Conexión propia para un trabajo en segundo plano (SQLite no comparte conexiones entre hilos)."""
+        return sgm.conectar(DB)
+
     def exportar_powerbi(self):
         self._guardar_pendientes()
-        try:
-            ruta = pbi.exportar(self.con, BASE, sem.umbrales(self.cfg))
-        except PermissionError:
+        umbrales = sem.umbrales(self.cfg)
+
+        def trabajo():
+            con = self.conexion()
+            try:
+                return pbi.exportar(con, BASE, umbrales)
+            except PermissionError:
+                return None
+            finally:
+                con.close()
+        self._en_segundo_plano("Generando «Datos Power BI.xlsx»", trabajo, self._fin_powerbi)
+
+    def _fin_powerbi(self, ruta):
+        if ruta is None:
             messagebox.showwarning("Datos Power BI", f"«{pbi.ARCHIVO}» está abierto en Excel: ciérralo y vuelve a "
                                                      f"intentarlo.", parent=self)
             return
@@ -353,6 +467,23 @@ class App(tk.Tk):
                                                  f"En Power BI pulsa «Actualizar» para ver los datos nuevos.\n\n"
                                                  f"¿Abrir la carpeta?", parent=self):
             os.startfile(os.path.dirname(ruta))
+
+    def _aviso_onedrive(self):
+        """Si dos personas escriben en la base y está en OneDrive, se perderán cambios: se avisa una vez al día."""
+        if not en_onedrive() or self.cfg.get("aviso_onedrive") == date.today().isoformat():
+            return
+        desde = (date.today() - timedelta(days=30)).isoformat()
+        autores = {r[0] for r in self.con.execute(
+            "SELECT DISTINCT autor FROM comentarios WHERE tipo<>'sistema' AND fecha>=? AND autor<>''", (desde,))}
+        if len(autores) > 1:
+            self.cfg["aviso_onedrive"] = date.today().isoformat()
+            guardar_cfg(self.cfg)
+            messagebox.showwarning(
+                "Base compartida en OneDrive",
+                f"En el último mes escribieron en esta base {len(autores)} personas ({', '.join(sorted(autores))}), "
+                f"pero la carpeta está en OneDrive.\n\nOneDrive no sabe combinar cambios simultáneos: si dos personas "
+                f"guardan a la vez, se crean copias en conflicto y se pierden datos. Mueve la carpeta a una unidad de "
+                f"red del servidor (ver README, «Dos compradores en la misma base»).", parent=self)
 
     def report_callback_exception(self, exc, val, tb):
         """Errores en botones: en el .exe no hay consola, así que se muestran y se guardan en errores.log."""
@@ -417,7 +548,7 @@ class App(tk.Tk):
         self.v_buscar = tk.StringVar()
         e = ttk.Entry(filt, textvariable=self.v_buscar, width=28)
         e.pack(side="left", padx=(4, 12))
-        self.v_buscar.trace_add("write", lambda *_: self.pintar())
+        self.v_buscar.trace_add("write", lambda *_: self.diferir("oc", self.pintar))
         self.v_comprador = self._combo(filt, "Comprador:", ["Todos"], 18)
         self.v_estado_oc = self._combo(filt, "Estado OC:", ["Todos", "En proceso", "Cerrado", "Cancelado"], 13)
         self.v_situacion = self._combo(filt, "Situación:", SITUACIONES, 18)
@@ -437,6 +568,8 @@ class App(tk.Tk):
         self.lbl_resumen.pack(side="left")
 
         self.tree = self._tabla(tab_oc, COLS, self.ordenar, ("proveedor", "ult_com"))
+        # Responsable y compromiso casi no se usan: se ocultan de la lista (se editan en el panel de abajo)
+        self.tree["displaycolumns"] = [c[0] for c in COLS if c[0] not in ("responsable", "compromiso")]
         for nivel, color in sem.FONDO.items():
             self.tree.tag_configure(nivel, background=color)
         self.tree.tag_configure("vencido", foreground="#9C0006")
@@ -451,7 +584,7 @@ class App(tk.Tk):
         ttk.Label(ff, text="Buscar:").pack(side="left")
         self.vf_buscar = tk.StringVar()
         ttk.Entry(ff, textvariable=self.vf_buscar, width=24).pack(side="left", padx=(4, 12))
-        self.vf_buscar.trace_add("write", lambda *_: self.pintar_fac())
+        self.vf_buscar.trace_add("write", lambda *_: self.diferir("fac", self.pintar_fac))
         self.vf_estado = self._combo(ff, "Estado factura:", ESTADOS_FACT_FILTRO, 17, self.pintar_fac)
         self.vf_comprador = self._combo(ff, "Comprador:", ["Todos"], 18, self.pintar_fac)
         self.vf_estado_oc = self._combo(ff, "Estado OC:", ["Todos", "En proceso", "Cerrado", "Cancelado"], 11, self.pintar_fac)
@@ -500,6 +633,17 @@ class App(tk.Tk):
         ttk.Label(izq, text="dd/mm/aaaa", foreground="#808080").grid(row=5, column=1, sticky="w")
         self.btn_guardar = ttk.Button(izq, text="💾  Guardar cambios", command=self.guardar_orden, state="disabled")
         self.btn_guardar.grid(row=6, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        rap = ttk.LabelFrame(izq, text="Acciones rápidas (cambian el estado y dejan el comentario)", padding=4)
+        rap.grid(row=7, column=0, columnspan=2, sticky="we", pady=(8, 0))
+        self.btn_rapidos = []
+        for k, (txt, estado, comentario) in enumerate(ACCIONES):
+            b = ttk.Button(rap, text=txt, state="disabled",
+                           command=lambda e=estado, c=comentario: self.accion_rapida(e, c))
+            b.grid(row=k // 2, column=k % 2, sticky="we", padx=2, pady=2)
+            self.btn_rapidos.append(b)
+        b = ttk.Button(rap, text="📅  Compromiso en 7 días", state="disabled", command=self.compromiso_7)
+        b.grid(row=1, column=1, sticky="we", padx=2, pady=2)
+        self.btn_rapidos.append(b)
 
         mid = ttk.LabelFrame(det, text="Historial (trazabilidad)", padding=6)
         mid.grid(row=0, column=1, sticky="nsew", padx=(0, 6))
@@ -641,8 +785,9 @@ class App(tk.Tk):
     def _texto_detalle(self):
         d = detalle_sap.ultima_carga(self.con)
         if d is None:
-            return "   |   Reporte de detalle: aún no cargado"
-        return f"   |   Detalle (ingresos y líneas): archivo del {fmt_fecha(d['fecha_archivo'])} {d['fecha_archivo'][11:16]}"
+            return "   |   ⚠ Reporte de detalle: aún no cargado"
+        viejo = " ⚠ más antiguo que el Control: cárgalo de nuevo" if aviso_detalle(self.con) else ""
+        return f"   |   Detalle (ingresos y líneas): archivo del {fmt_fecha(d['fecha_archivo'])} {d['fecha_archivo'][11:16]}{viejo}"
 
     def refrescar_req(self):
         ui_req.refrescar(self)
@@ -659,9 +804,12 @@ class App(tk.Tk):
                 continue
             if f["situacion"] != sgm.FACT_VIGENTE and not self.vf_fuera.get():
                 continue
-            if est == "(sin estado)" and f["estado_factura"]:
+            vista = f["estado_vista"]
+            if est == "(sin estado)" and vista:
                 continue
-            if est not in ("Todos", "(sin estado)") and f["estado_factura"] != est:
+            if est == reglas.PENDIENTE and vista not in POR_PAGAR:
+                continue
+            if est not in ("Todos", "(sin estado)", reglas.PENDIENTE) and vista != est:
                 continue
             if comp != "Todos" and f["usuario"] != comp:
                 continue
@@ -678,7 +826,7 @@ class App(tk.Tk):
 
     @staticmethod
     def _dias_venc(f):
-        if f["estado_factura"] == "Pagado" or not f["vencimiento"]:
+        if reglas.saldada(f["estado_factura"], f["imp_pendiente"], f["mon"]) or not f["vencimiento"]:
             return None
         return -(sgm.dias_desde(f["vencimiento"]))
 
@@ -698,32 +846,35 @@ class App(tk.Tk):
             tags = []
             if f["situacion"] != sgm.FACT_VIGENTE:
                 tags.append("fuera")
-            elif f["estado_factura"] == "Pagado":
+            elif f["estado_vista"] in (reglas.PAGADO, reglas.RESIDUAL):
                 tags.append("pagada")
             elif f["nivel"] in sem.FONDO:
                 tags.append(f["nivel"])
             dv = self._dias_venc(f)
             t.insert("", "end", iid=f"{f['ruc']}|{f['n_factura']}", tags=tags, values=(
                 f["numero_oc"], f["usuario"], f["proveedor"], f["n_factura"], f["tipo"],
-                "Pago parcial" if f["estado_detalle"] == "Pago parcial" else f["estado_factura"], f["mon"],
+                f["estado_vista"], f["mon"],
                 f"{f['ft_sin_imp'] or 0:,.2f}", f"{f['imp_pendiente'] or 0:,.2f}", fmt_fecha(f["emision"]),
                 fmt_fecha(f["vencimiento"]), "" if dv is None else dv, sem.TEXTO_FACT.get(f["nivel"], ""),
                 fmt_fecha(f["fecha_pago"]), sgm.estado_visible(f["serie"], f["estado_oc"], f["fecha_oc"], f["ingresado"]),
                 (f["ult_com"] or "").replace("\n", " ")))
         u = sem.umbrales(self.cfg)
-        vig = [f for f in self.facturas if f["situacion"] == sgm.FACT_VIGENTE]
-        pend = [f for f in vig if f["estado_factura"] == "Pendiente de pago"]
+        comp = self.vf_comprador.get()        # los totales siguen el filtro de comprador
+        vig = [f for f in self.facturas if f["situacion"] == sgm.FACT_VIGENTE and comp in ("Todos", f["usuario"])]
+        pend = [f for f in vig if f["estado_vista"] in POR_PAGAR]
+        residuales = sum(1 for f in vig if f["estado_vista"] == reglas.RESIDUAL)
         venc = sum(1 for f in pend if sem.nivel_factura(f, u) == sem.ROJO)
         por_vencer = sum(1 for f in pend if sem.nivel_factura(f, u) == sem.AMARILLO)
         tot = {}
         for f in filas:
-            if f["estado_factura"] != "Pagado":
+            if f["estado_vista"] in POR_PAGAR:
                 tot[f["mon"]] = tot.get(f["mon"], 0) + (f["imp_pendiente"] or 0)
         txt_tot = " · ".join(f"{m} {v:,.2f}" for m, v in sorted(tot.items()) if v)
         self.lbl_resumen_fac.config(
             text=f"Mostrando {len(filas)}   |   Pendientes de pago: {len(pend)} (vencidas {venc}, vencen en "
                  f"{u['fact']} días o menos {por_vencer}) · "
-                 f"Pagadas: {sum(1 for f in vig if f['estado_factura'] == 'Pagado')}"
+                 f"Pagadas: {sum(1 for f in vig if f['estado_vista'] == reglas.PAGADO)} · "
+                 f"Saldo residual (diferencia de montos, no cuenta como pendiente): {residuales}"
                  + (f"\nImporte pendiente de lo mostrado: {txt_tot}" if txt_tot else ""))
         if self.modo == "fac" and self.oc_sel:
             if self.fac_sel and t.exists(self.fac_sel):
@@ -842,10 +993,12 @@ class App(tk.Tk):
                 sgm.estado_visible(f["serie"], f["estado_oc"], f["fecha_oc"], f["ingresado"]), texto_logistica(f),
                 f["situacion"], f["estado_seg"],
                 f["responsable"] or "", fmt_fecha(f["fecha_compromiso"]), (f["ult_com"] or "").replace("\n", " ")))
-        activas = [f for f in self.filas if f["situacion"] == sgm.SIT_ACTIVA]
+        comp = self.v_comprador.get()          # los totales siguen el filtro de comprador
+        del_comprador = [f for f in self.filas if comp in ("Todos", f["usuario"])]
+        activas = [f for f in del_comprador if f["situacion"] == sgm.SIT_ACTIVA]
         sin_c = sum(1 for f in activas if not f["n_com"])
         venc = sum(1 for f in activas if f["fecha_compromiso"] and f["fecha_compromiso"] < hoy)
-        por_sit = {s: sum(1 for f in self.filas if f["situacion"] == s) for s in SITUACIONES[1:-1]}
+        por_sit = {s: sum(1 for f in del_comprador if f["situacion"] == s) for s in SITUACIONES[1:-1]}
         cerradas = " · ".join(f"{s}: {n}" for s, n in por_sit.items())
         u = sem.umbrales(self.cfg)
         rojas = sum(1 for f in activas if sem.nivel_oc(f, u) == sem.ROJO)
@@ -976,6 +1129,8 @@ class App(tk.Tk):
         for w in (self.cb_det_seg, self.ent_resp, self.ent_comp):
             w.config(state=("readonly" if w is self.cb_det_seg else "normal") if editable else "disabled")
         self.btn_guardar.config(state="normal" if editable else "disabled")
+        for b in self.btn_rapidos:
+            b.config(state="normal" if editable else "disabled")
         self.btn_com.config(state="normal")
         if self._com_oc != self.oc_sel:         # cada OC conserva su propio borrador de comentario
             self._guardar_borrador()
@@ -1033,6 +1188,37 @@ class App(tk.Tk):
         if cambio and refrescar:
             self.refrescar()
         return cambio
+
+    def accion_rapida(self, estado, comentario):
+        """Un clic: cambia el estado de seguimiento de la OC y deja el comentario en su historial."""
+        f = self._fila_sel()
+        if f is None:
+            return
+        self._guardar_pendientes()
+        sgm.actualizar_orden(self.con, self.oc_sel, estado, f["responsable"] or "", f["fecha_compromiso"] or "",
+                             self.cfg.get("autor", ""))
+        sgm.comentar(self.con, self.oc_sel, comentario, self.cfg.get("autor", ""))
+        self.con.commit()
+        oc = self.oc_sel
+        self.refrescar()
+        self.lbl_estado_rapido(f"OC {oc}: {estado} (comentario registrado)")
+
+    def compromiso_7(self):
+        """Fecha compromiso = hoy + 7 días."""
+        f = self._fila_sel()
+        if f is None:
+            return
+        fecha = (date.today() + timedelta(days=7)).isoformat()
+        self._guardar_pendientes()
+        sgm.actualizar_orden(self.con, self.oc_sel, f["estado_seg"], f["responsable"] or "", fecha, self.cfg.get("autor", ""))
+        oc = self.oc_sel
+        self.refrescar()
+        self.lbl_estado_rapido(f"OC {oc}: compromiso al {fmt_fecha(fecha)}")
+
+    def lbl_estado_rapido(self, texto):
+        """Confirmación breve en la barra de estado (sin ventanas)."""
+        self._aviso = texto
+        self.lbl_estado.config(text=f"✔ {texto}   ·   " + self.lbl_estado.cget("text").split("   ·   ", 1)[-1])
 
     def agregar_comentario(self):
         texto = self.txt_com.get("1.0", "end").strip()
@@ -1277,6 +1463,12 @@ class App(tk.Tk):
         if control:
             self.cfg["ultimo_csv"] = control[0]
             guardar_cfg(self.cfg)
+        if detalle and detalle_mas_antiguo(detalle[0]) and not messagebox.askyesno(
+                "Reporte de detalle anterior", detalle_mas_antiguo(detalle[0]) + "\n\n¿Cargarlo de todas formas?",
+                icon="warning", default="no", parent=self):
+            detalle = []
+            if not control:
+                return
         if detalle:
             def tras_detalle(r):
                 texto = (f"Reporte de detalle cargado: {r['ocs']} OC aprobadas, {r['lineas']} líneas, "
@@ -1329,6 +1521,9 @@ class App(tk.Tk):
             self.refrescar()
             if previo:
                 msg = previo + "\n\n" + msg
+            aviso = aviso_detalle(self.con)
+            if aviso:
+                msg += "\n\n⚠ " + aviso
             if salida is None:
                 messagebox.showwarning("Reporte no aplicado", msg, parent=self)
             elif messagebox.askyesno("Carga completada", msg + "\n\n¿Abrir el control en Excel?", parent=self):
@@ -1362,7 +1557,9 @@ class App(tk.Tk):
 
     def abrir_control(self):
         u = sgm.ultima_carga(self.con)
-        rutas = [r for r in (self.cfg.get("ultimo_control"), u["salida"] if u else None) if r and os.path.exists(r)]
+        # Los controles antiguos pudieron moverse a la carpeta Controles: se buscan también ahí
+        rutas = [x for r in (self.cfg.get("ultimo_control"), u["salida"] if u else None) if r
+                 for x in (r, os.path.join(BASE, CONTROLES, os.path.basename(r))) if os.path.exists(x)]
         if rutas:
             os.startfile(max(rutas, key=os.path.getmtime))   # la carga pudo hacerla el otro comprador
         else:
@@ -1379,7 +1576,10 @@ def main():
         detalle, control = separar_reportes([a for a in sys.argv[2:] if not a.startswith("--")])
         with open(os.path.join(BASE, "ultima_carga.log"), "w", encoding="utf-8") as fh:
             try:
-                det = [cargar_detalle(d) for d in detalle]
+                antiguos = [d for d in detalle if detalle_mas_antiguo(d) and "--forzar" not in sys.argv]
+                det = [cargar_detalle(d) for d in detalle if d not in antiguos]
+                if antiguos:
+                    fh.write(f"Detalle OMITIDO: {detalle_mas_antiguo(antiguos[0])} Usa --forzar para cargarlo igual.\n")
                 if not control:
                     r = reaplicar_control()
                     fh.write(f"{ahora} OK (solo detalle; se reaplicó el último Control: {r[0] if r else 'no hay'})\n"

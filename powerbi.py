@@ -25,11 +25,12 @@ from datetime import date, datetime
 import consulta as cq
 import requerimientos as rq
 import semaforo as sem
+import reglas
 import seguimiento as sgm
 from detalle_sap import SIN_DETALLE
 
 ARCHIVO = "Datos Power BI.xlsx"
-MON = {"SOL": "PEN"}             # SAP usa SOL en facturas y PEN en la OC
+MON = reglas.MON                 # SAP usa SOL en facturas y PEN en la OC
 TOLERANCIA = 0.005               # facturado vs OC: ±0.5 % se considera exacto
 DIAS_FACTURA = 30                # puntualidad: primera factura hasta 30 días después de la OC
 PESOS = {"Cumplimiento": 0.4, "Puntualidad": 0.3, "OTIF": 0.3}     # scorecard de proveedores
@@ -84,7 +85,7 @@ def tablas(con, umbrales):
     for x in sorted(universo.values(), key=lambda x: x["oc"]):
         sap, o = x["sap"], x["orden"]
         vig = [f for f in x["facturas"] if f["situacion"] == sgm.FACT_VIGENTE]
-        pend = [f for f in vig if f["estado_factura"] != "Pagado"]
+        pend = [f for f in vig if not reglas.saldada(f["estado_factura"], f["imp_pendiente"], f["mon"])]
         venc = [f for f in pend if f["vencimiento"] and f["vencimiento"] < hoy.isoformat()]
         facturado = sum(f["ft_sin_imp"] or 0 for f in vig)
         activa = o is not None and o["situacion"] == sgm.SIT_ACTIVA
@@ -128,10 +129,12 @@ def tablas(con, umbrales):
         dv = (_d(f["vencimiento"]).date() - hoy).days if f["vencimiento"] else None
         facturas.append([
             f["numero_oc"], f["usuario"], f["proveedor"], f["ruc"], f["n_factura"], f["tipo"],
-            f["estado_factura"] or "(sin estado)", f["situacion"], MON.get(f["mon"], f["mon"]), f["ft_sin_imp"],
+            (reglas.RESIDUAL if reglas.estado_factura(f["estado_factura"], f["imp_pendiente"], f["mon"]) == reglas.RESIDUAL
+             else f["estado_factura"] or "(sin estado)"), f["situacion"], MON.get(f["mon"], f["mon"]), f["ft_sin_imp"],
             f["imp_pendiente"], _d(f["emision"]), _d(f["vencimiento"]),
             _d(f["vencimiento"]).strftime("%Y-%m") if f["vencimiento"] else None, _d(f["fecha_pago"]),
-            dv if f["estado_factura"] != "Pagado" else None, sem.TEXTO_FACT.get(sem.nivel_factura(f, umbrales), ""),
+            None if reglas.saldada(f["estado_factura"], f["imp_pendiente"], f["mon"]) else dv,
+            sem.TEXTO_FACT.get(sem.nivel_factura(f, umbrales), ""),
             f["estado_oc"]])
     col_fac = ["OC", "Comprador", "Proveedor", "RUC", "N° factura", "Tipo", "Estado factura", "Situación", "Moneda",
                "FT sin impuestos", "Importe pendiente", "Emisión", "Vencimiento", "Mes vencimiento", "Fecha de pago",
@@ -189,7 +192,7 @@ def ciclo(x, d, fecha, vigentes):
     sap = x["sap"] or {}
     pagos = [f["fecha_pago"] for f in vigentes if f["fecha_pago"]]
     emisiones = [f["emision"] for f in vigentes if f["emision"]]
-    todas_pagadas = vigentes and all(f["estado_factura"] == "Pagado" for f in vigentes)
+    todas_pagadas = vigentes and all(reglas.saldada(f["estado_factura"], f["imp_pendiente"], f["mon"]) for f in vigentes)
     return [d.get("tipo_oc") or "", d.get("estado_logistico") or SIN_DETALLE, _d(d.get("fecha_entrada")),
             d.get("pct_ingresado"), d.get("proyecto") or "", d.get("unidad_negocio") or "", d.get("area") or "",
             _dias(fecha, sap.get("aprobacion")), _dias(fecha, d.get("fecha_entrada")),

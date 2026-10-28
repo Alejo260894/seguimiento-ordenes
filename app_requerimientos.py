@@ -489,11 +489,19 @@ def construir(app, tab_req, tab_ind):
     barra.pack(fill="x")
     ttk.Button(barra, text="➕  Nuevo requerimiento", style="Accent.TButton", command=lambda: EditorReq(app)).pack(side="left")
     ttk.Button(barra, text="✏  Editar", command=lambda: editar(app)).pack(side="left", padx=6)
-    ttk.Button(barra, text="📤  Exportar Excel", command=lambda: exportar(app)).pack(side="left")
+    ttk.Button(barra, text="📅  Registrar hoy", command=lambda: registrar_hoy(app)).pack(side="left")
+    ttk.Button(barra, text="✅  Conformidad hoy", command=lambda: conformidad_hoy(app)).pack(side="left", padx=6)
+    app.btn_oc_sin_req = ttk.Button(barra, text="🔗  OC sin requerimiento", command=lambda: oc_sin_requerimiento(app))
+    app.btn_oc_sin_req.pack(side="left")
+    ttk.Button(barra, text="📤  Exportar Excel", command=lambda: exportar(app)).pack(side="left", padx=(6, 0))
     ttk.Button(barra, text="📊  Resumen ejecutivo", style="Accent.TButton",
-               command=lambda: exportar_resumen(app)).pack(side="left", padx=(6, 0))
-    ttk.Button(barra, text="📚  Actualizar catálogos", command=lambda: catalogos(app)).pack(side="left", padx=6)
-    ttk.Button(barra, text="📥  Importar desde Excel…", command=lambda: importar(app)).pack(side="left", padx=(0, 18))
+               command=lambda: exportar_resumen(app)).pack(side="left", padx=6)
+    mas = ttk.Menubutton(barra, text="⚙  Más ▾")
+    menu = tk.Menu(mas, tearoff=0)
+    menu.add_command(label="📚  Actualizar catálogos (proyectos y proveedores)", command=lambda: catalogos(app))
+    menu.add_command(label="📥  Importar desde Excel…", command=lambda: importar(app))
+    mas["menu"] = menu
+    mas.pack(side="left", padx=(0, 18))
     app.vr_comprador = app._combo(barra, "Comprador:", ["Todos"], 20, lambda: pintar_req(app))
     app.lbl_cat = ttk.Label(barra, text="", foreground="#808080")
     app.lbl_cat.pack(side="right")
@@ -503,7 +511,7 @@ def construir(app, tab_req, tab_ind):
     ttk.Label(f1, text="Buscar:").pack(side="left")
     app.vr_buscar = tk.StringVar()
     ttk.Entry(f1, textvariable=app.vr_buscar, width=24).pack(side="left", padx=(4, 12))
-    app.vr_buscar.trace_add("write", lambda *_: pintar_req(app))
+    app.vr_buscar.trace_add("write", lambda *_: app.diferir("req", lambda: pintar_req(app)))
     app.vr_etapa = app._combo(f1, "Etapa:", FILTRO_ETAPA, 28, lambda: pintar_req(app))
     app.vr_tipo = app._combo(f1, "Tipo:", ["Todos"] + rq.TIPOS, 8, lambda: pintar_req(app))
     app.vr_controller = app._combo(f1, "Controller:", ["Todos"], 26, lambda: pintar_req(app))
@@ -768,7 +776,24 @@ def exportar_resumen(app):
     comp = app.vr_comprador.get()
     comp = None if comp == "Todos" else comp
     nombre = f"Resumen seguimiento{' ' + comp if comp else ''} {date.today():%d_%m}.xlsx"
-    salida = resumen_excel.exportar(app.con, os.path.join(app_base(app), nombre), comp)
+    destino = os.path.join(_carpeta_exportes(app), nombre)
+
+    def trabajo():
+        con = app.conexion()
+        try:
+            return resumen_excel.exportar(con, destino, comp)
+        finally:
+            con.close()
+    app._en_segundo_plano("Generando el resumen ejecutivo", trabajo, lambda salida: _abrir_resumen(app, salida))
+
+
+def _carpeta_exportes(app):
+    ruta = os.path.join(app_base(app), "Exportes")
+    os.makedirs(ruta, exist_ok=True)
+    return ruta
+
+
+def _abrir_resumen(app, salida):
     if messagebox.askyesno("Resumen ejecutivo",
                            f"Se generó {os.path.basename(salida)}.\n\nEn la hoja «Panel» elige los filtros en las celdas "
                            f"amarillas o escribe un N° de OC o COD para ver su explicación.\n\n¿Abrirlo en Excel?",
@@ -783,6 +808,158 @@ def exportar(app):
     comp = app.vr_comprador.get()
     comp = None if comp == "Todos" else comp
     nombre = f"Seguimiento requerimientos{' ' + comp if comp else ''} {date.today():%d_%m}.xlsx"
-    salida = rq.exportar_excel(app.con, os.path.join(app_base(app), nombre), plazos, comp)
-    if messagebox.askyesno("Exportar", f"Se generó {os.path.basename(salida)}.\n\n¿Abrirlo en Excel?", parent=app):
-        os.startfile(salida)
+    destino = os.path.join(_carpeta_exportes(app), nombre)
+
+    def trabajo():
+        con = app.conexion()
+        try:
+            return rq.exportar_excel(con, destino, plazos, comp)
+        finally:
+            con.close()
+
+    def fin(salida):
+        if messagebox.askyesno("Exportar", f"Se generó {os.path.basename(salida)} (carpeta Exportes).\n\n"
+                                           f"¿Abrirlo en Excel?", parent=app):
+            os.startfile(salida)
+    app._en_segundo_plano("Exportando el seguimiento de requerimientos", trabajo, fin)
+
+
+# ---------------------------------------------------------------------------
+# Acciones rápidas
+def _seleccionado(app, titulo):
+    sel = app.tree_req.selection()
+    if not sel:
+        messagebox.showinfo(titulo, "Selecciona un requerimiento de la lista.", parent=app)
+        return None
+    return next(x for x in app.filas_req if x["id"] == int(sel[0]))
+
+
+def _guardar_campo(app, f, campo, valor):
+    vals = {c: f[c] for c, _, _ in rq.CAMPOS}
+    vals.update({c: f.get(c) for c in ("notas", "comprador", *rq.CAMPOS_KPI)})
+    vals[campo] = valor
+    vals["_modificado"] = f["modificado"]
+    try:
+        rq.guardar(app.con, vals, app.cfg.get("autor", ""))
+    except rq.EdicionSimultanea as e:
+        app.con.rollback()
+        messagebox.showwarning("Modificado por otro usuario", f"{e} modificó este requerimiento recién: revisa el "
+                                                              f"historial y vuelve a intentarlo.", parent=app)
+        return
+    app.refrescar_req()
+    if app.tree_req.exists(str(f["id"])):
+        app.tree_req.selection_set(str(f["id"]))
+        app.tree_req.see(str(f["id"]))
+
+
+def siguiente_etapa(f):
+    """(campo, etiqueta) de la próxima fecha a registrar según la etapa actual, o None si no hay."""
+    if f["etapa"] not in rq.NOMBRES_ETAPA:
+        return None
+    for nombre, campo in rq.ETAPAS[rq.NOMBRES_ETAPA.index(f["etapa"]) + 1:]:
+        if not f[campo]:
+            return campo, rq.ETIQUETAS[campo]
+    return None
+
+
+def registrar_hoy(app):
+    """Un clic: la fecha de hoy en la siguiente etapa del requerimiento (p. ej. «Envío de orden»)."""
+    f = _seleccionado(app, "Registrar hoy")
+    if f is None:
+        return
+    sig = siguiente_etapa(f)
+    if sig is None:
+        messagebox.showinfo("Registrar hoy", f"El requerimiento {f['id']:03d} está en «{f['etapa']}»: no hay una "
+                                             f"etapa siguiente que registrar.", parent=app)
+        return
+    campo, etiqueta = sig
+    if messagebox.askyesno("Registrar hoy", f"Requerimiento {f['id']:03d} · {f['proveedor'] or f['referencia']}\n"
+                                            f"Etapa actual: {f['etapa']}\n\n¿Registrar «{etiqueta}» con fecha de hoy "
+                                            f"({date.today():%d/%m/%Y})?", parent=app):
+        _guardar_campo(app, f, campo, date.today().isoformat())
+
+
+def conformidad_hoy(app):
+    """Un clic: conformidad (entrega real del bien o servicio) con fecha de hoy, para el OTIF."""
+    f = _seleccionado(app, "Conformidad hoy")
+    if f is None:
+        return
+    previa = f" (hoy figura {rq.fmt(f['f_conformidad'])})" if f["f_conformidad"] else ""
+    if messagebox.askyesno("Conformidad hoy", f"Requerimiento {f['id']:03d} · {f['proveedor'] or f['referencia']}{previa}"
+                                              f"\n\n¿Registrar la conformidad (entrega real) con fecha de hoy?", parent=app):
+        _guardar_campo(app, f, "f_conformidad", date.today().isoformat())
+
+
+def ocs_sin_requerimiento(con, comprador=None):
+    """OC abiertas del comprador (en proceso en SAP) que no tienen un requerimiento registrado."""
+    con_req = {r[0] for r in con.execute("SELECT DISTINCT orden FROM req WHERE orden IS NOT NULL")}
+    q = """SELECT s.*, d.proyecto AS d_proyecto, d.tipo_oc FROM sap_oc s LEFT JOIN detalle_oc d ON d.numero_oc=s.numero_oc
+           WHERE s.estado='En proceso'""" + (" AND s.usuario=?" if comprador else "") + " ORDER BY s.fecha"
+    return [dict(r) for r in con.execute(q, (comprador,) if comprador else ()) if r["numero_oc"] not in con_req]
+
+
+def oc_sin_requerimiento(app):
+    """Lista las OC abiertas sin requerimiento y crea uno con los datos de SAP ya puestos."""
+    comp = app.vr_comprador.get()
+    comp = None if comp == "Todos" else comp
+    win = tk.Toplevel(app)
+    win.title("OC abiertas sin requerimiento")
+    win.geometry("980x460")
+    win.transient(app)
+    ttk.Label(win, padding=(10, 8), foreground="#404040", wraplength=940, justify="left",
+              text="Estas OC están abiertas en SAP pero no tienen un requerimiento en la app. Elige una y pulsa "
+                   "«Crear requerimiento»: el formulario se abre con la OC, el proveedor, el monto y el proyecto de "
+                   "SAP; completa lo demás (referencia, tipo, fechas) y guarda.").pack(fill="x")
+    marco = ttk.Frame(win, padding=(10, 0))
+    marco.pack(fill="both", expand=True)
+    cols = [("oc", "OC", 90), ("fecha", "Fecha OC", 85), ("prov", "Proveedor", 330), ("mon", "Mon", 50),
+            ("total", "Total sin IGV", 110), ("tipo", "Tipo", 80), ("proy", "Proyecto", 90), ("usu", "Comprador", 120)]
+    t = ttk.Treeview(marco, columns=[c[0] for c in cols], show="headings")
+    for k, txt, w in cols:
+        t.heading(k, text=txt)
+        t.column(k, width=w, anchor="e" if k in ("oc", "total") else "w", stretch=k == "prov")
+    sy = ttk.Scrollbar(marco, command=t.yview)
+    t.configure(yscrollcommand=sy.set)
+    t.pack(side="left", fill="both", expand=True)
+    sy.pack(side="left", fill="y")
+    pie = ttk.Frame(win, padding=10)
+    pie.pack(fill="x")
+    lbl = ttk.Label(pie, foreground="#404040")
+    lbl.pack(side="left")
+    datos = {}
+
+    def llenar():
+        t.delete(*t.get_children())
+        datos.clear()
+        for o in ocs_sin_requerimiento(app.con, comp):
+            datos[str(o["numero_oc"])] = o
+            t.insert("", "end", iid=str(o["numero_oc"]), values=(
+                o["numero_oc"], rq.fmt(o["fecha"]), o["proveedor"], o["mon"], f"{o['total'] or 0:,.2f}",
+                o["tipo_oc"] or "", o["d_proyecto"] or "", o["usuario"]))
+        lbl.config(text=f"{len(datos)} OC sin requerimiento" + (f" de {comp}" if comp else ""))
+        app.btn_oc_sin_req.config(text=f"🔗  OC sin requerimiento ({len(datos)})")
+
+    def crear():
+        sel = t.selection()
+        if not sel:
+            messagebox.showinfo("Crear requerimiento", "Elige una OC de la lista.", parent=win)
+            return
+        o = datos[sel[0]]
+        ed = EditorReq(app)
+        ed.v["orden"].set(str(o["numero_oc"]))
+        ed.v["proveedor"].set(o["proveedor"] or "")
+        ed.v["proyecto"].set(o["d_proyecto"] or "")
+        ed.v["tipo"].set("RQ")
+        ed.v["f_solic"].set(rq.fmt(o["fecha"]))
+        ed.v["comprador"].set(o["usuario"] or app.cfg.get("comprador", ""))
+        ed.txt_notas.insert("1.0", f"Creado desde la OC {o['numero_oc']} de SAP (la fecha de solicitud es la de la OC: "
+                                   f"corrígela si la conoces).")
+        ed._mostrar_proyecto()
+        ed._mostrar_sap()
+        win.wait_window(ed)
+        llenar()
+
+    ttk.Button(pie, text="Cerrar", command=win.destroy).pack(side="right")
+    ttk.Button(pie, text="➕  Crear requerimiento", style="Accent.TButton", command=crear).pack(side="right", padx=6)
+    t.bind("<Double-1>", lambda e: crear())
+    llenar()

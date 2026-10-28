@@ -9,6 +9,7 @@ Con eso se arma un status corto (para la lista) y uno completo para copiar y env
 """
 from datetime import date, datetime
 
+import reglas
 import seguimiento as sgm
 
 
@@ -25,7 +26,7 @@ def _fmt(iso):
 
 
 def _monto(mon, v):
-    mon = {"SOL": "PEN"}.get(mon, mon)          # las facturas dicen SOL y la OC PEN: se muestra igual
+    mon = reglas.moneda(mon)                    # las facturas dicen SOL y la OC PEN: se muestra igual
     return f"{mon or ''} {v or 0:,.2f}".strip()
 
 
@@ -102,18 +103,18 @@ def status(x, hoy=None):
             return "Sin factura · cerrada en el seguimiento (no se facturará)", "cerrada"
         seg = f" · {o['estado_seg']}" if o is not None and o["situacion"] == sgm.SIT_ACTIVA else ""
         return f"En proceso, sin factura{seg}", "atencion"
-    pendientes = [f for f in vigentes if f["estado_factura"] != "Pagado"]
+    pendientes = [f for f in vigentes if not reglas.saldada(f["estado_factura"], f["imp_pendiente"], f["mon"])]
     facturado = sum(f["ft_sin_imp"] or 0 for f in vigentes)
     pct = facturado / sap["total"] * 100 if sap["total"] else None
     if not pendientes:
         pagos = [f["fecha_pago"] for f in vigentes if f["fecha_pago"]]
-        if estado == "Cerrado" and not nota or (pct is not None and pct >= 99.5):
+        if reglas.oc_completa(estado, nota, sap["total"], facturado, sap["mon"]):
             return f"Pagada{' el ' + _fmt(max(pagos)) if pagos else ''}", "ok"
         return f"Pago parcial: facturas pagadas, OC facturada al {pct:.0f} %" if pct is not None else "Pago parcial", "pendiente"
     vencidas = [f for f in pendientes if f["vencimiento"] and f["vencimiento"] < hoy]
     txt = f"Facturada, pendiente de pago ({len(pendientes)} de {len(vigentes)} factura{'s' if len(vigentes) > 1 else ''}"
     txt += f", {len(vencidas)} vencida{'s' if len(vencidas) > 1 else ''})" if vencidas else ")"
-    if (estado == "En proceso" or nota) and pct is not None and pct < 99.5:
+    if (estado == "En proceso" or nota) and pct is not None and not reglas.oc_completa(estado, nota, sap["total"], facturado, sap["mon"]):
         txt += f" · OC facturada al {pct:.0f} %"
     return txt, "atencion" if vencidas else "pendiente"
 
@@ -164,10 +165,13 @@ def texto_status(x, fecha_reporte=None, comentarios=(), hoy=None, lineas=()):
     if vigentes:
         L.append(f"Facturas ({len(vigentes)}):")
         for f in vigentes:
-            linea = f"  • {f['n_factura']} · {f['estado_factura'] or 'sin estado'} · {_monto(f['mon'], f['ft_sin_imp'])} sin imp."
+            est = reglas.estado_factura(f["estado_factura"], f["imp_pendiente"], f["mon"])
+            linea = f"  • {f['n_factura']} · {est or 'sin estado'} · {_monto(f['mon'], f['ft_sin_imp'])} sin imp."
             if f["emision"]:
                 linea += f" · emitida {_fmt(f['emision'])}"
-            if f["estado_factura"] == "Pagado":
+            if est == reglas.RESIDUAL:
+                linea += f" · saldo residual {_monto(f['mon'], f['imp_pendiente'])} (diferencia de montos)"
+            elif f["estado_factura"] == "Pagado":
                 linea += f" · pagada {_fmt(f['fecha_pago'])}" if f["fecha_pago"] else ""
             elif f["vencimiento"]:
                 dias = (datetime.strptime(f["vencimiento"], "%Y-%m-%d").date() - hoy).days

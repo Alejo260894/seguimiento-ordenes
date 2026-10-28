@@ -16,6 +16,8 @@ from datetime import datetime, date
 
 import pandas as pd
 
+import reglas
+
 ESTADOS_SEG = ["Pendiente", "Solicitada al proveedor", "Factura en camino", "Observada / en revisión",
                "Esperando conformidad", "Cerrar sin factura"]
 SIT_ACTIVA = "Activa"
@@ -311,16 +313,28 @@ def _sincronizar_facturas(con, df, rep, rep_txt, fecha_ev, recien_facturadas, re
                      "Sistema", "sistema", fecha_ev)
 
 
+# Último comentario de usuario y cantidad de comentarios por OC (una sola pasada, sin subconsultas por fila)
+_COMENTARIOS_OC = """
+    ult AS (SELECT numero_oc, texto, fecha, ROW_NUMBER() OVER (PARTITION BY numero_oc ORDER BY fecha DESC, id DESC) AS rn
+            FROM comentarios WHERE tipo='usuario'),
+    nc AS (SELECT numero_oc, COUNT(*) AS n FROM comentarios WHERE tipo='usuario' GROUP BY numero_oc)"""
+
+
 def listar_facturas(con):
-    q = """SELECT f.*,
-             (SELECT ingresado FROM detalle_oc d WHERE d.numero_oc=f.numero_oc) AS ingresado,
-             (SELECT df.estado FROM detalle_facturas df WHERE df.numero_oc=f.numero_oc AND df.n_factura=f.n_factura
-                AND df.estado<>'Anulado' LIMIT 1) AS estado_detalle,
-             (SELECT texto FROM comentarios c WHERE c.numero_oc=f.numero_oc AND c.tipo='usuario' ORDER BY fecha DESC, id DESC LIMIT 1) AS ult_com,
-             (SELECT fecha FROM comentarios c WHERE c.numero_oc=f.numero_oc AND c.tipo='usuario' ORDER BY fecha DESC, id DESC LIMIT 1) AS ult_fecha,
-             (SELECT COUNT(*) FROM comentarios c WHERE c.numero_oc=f.numero_oc AND c.tipo='usuario') AS n_com
-           FROM facturas f"""
-    return [dict(r) for r in con.execute(q)]
+    q = f"""WITH {_COMENTARIOS_OC},
+             dfac AS (SELECT numero_oc, n_factura, MIN(estado) AS estado FROM detalle_facturas
+                      WHERE estado<>'Anulado' GROUP BY numero_oc, n_factura)
+           SELECT f.*, d.ingresado, dfac.estado AS estado_detalle, ult.texto AS ult_com, ult.fecha AS ult_fecha,
+                  COALESCE(nc.n, 0) AS n_com
+           FROM facturas f
+           LEFT JOIN detalle_oc d ON d.numero_oc=f.numero_oc
+           LEFT JOIN dfac ON dfac.numero_oc=f.numero_oc AND dfac.n_factura=f.n_factura
+           LEFT JOIN ult ON ult.numero_oc=f.numero_oc AND ult.rn=1
+           LEFT JOIN nc ON nc.numero_oc=f.numero_oc"""
+    filas = [dict(r) for r in con.execute(q)]
+    for f in filas:       # estado para mostrar y filtrar: Pagado, Saldo residual, Pago parcial, Pendiente de pago…
+        f["estado_vista"] = reglas.estado_factura(f["estado_factura"], f["imp_pendiente"], f["mon"], f["estado_detalle"])
+    return filas
 
 
 def ultimos_comentarios(con):
@@ -360,11 +374,12 @@ def actualizar_orden(con, oc, estado_seg, responsable, fecha_compromiso, autor):
 
 
 def listar(con):
-    q = """SELECT o.*, d.ingresado, d.estado_logistico AS logistica, d.fecha_entrada, d.tipo_oc, d.pct_ingresado,
-             (SELECT texto FROM comentarios c WHERE c.numero_oc=o.numero_oc AND c.tipo='usuario' ORDER BY fecha DESC, id DESC LIMIT 1) AS ult_com,
-             (SELECT fecha FROM comentarios c WHERE c.numero_oc=o.numero_oc AND c.tipo='usuario' ORDER BY fecha DESC, id DESC LIMIT 1) AS ult_fecha,
-             (SELECT COUNT(*) FROM comentarios c WHERE c.numero_oc=o.numero_oc AND c.tipo='usuario') AS n_com
-           FROM ordenes o LEFT JOIN detalle_oc d ON d.numero_oc=o.numero_oc"""
+    q = f"""WITH {_COMENTARIOS_OC}
+           SELECT o.*, d.ingresado, d.estado_logistico AS logistica, d.fecha_entrada, d.tipo_oc, d.pct_ingresado,
+                  ult.texto AS ult_com, ult.fecha AS ult_fecha, COALESCE(nc.n, 0) AS n_com
+           FROM ordenes o LEFT JOIN detalle_oc d ON d.numero_oc=o.numero_oc
+           LEFT JOIN ult ON ult.numero_oc=o.numero_oc AND ult.rn=1
+           LEFT JOIN nc ON nc.numero_oc=o.numero_oc"""
     return [dict(r) for r in con.execute(q)]
 
 

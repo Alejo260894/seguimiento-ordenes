@@ -19,6 +19,7 @@ from datetime import date, datetime, timedelta
 import pandas as pd
 
 import detalle_sap
+import reglas
 import seguimiento as sgm
 
 # Campos de un requerimiento: (columna en la base, encabezado en el Excel CONTROL, tipo)
@@ -54,7 +55,7 @@ CAMPOS_KPI = ["monto_ref", "tipo_ref", "f_conformidad"]
 TIPOS_REF = ["Cotización inicial", "Presupuesto", "Precio histórico", "Precio de mercado", "Licitación"]
 TIPOS = ["RQ", "VALO", "VUELO", "RH"]
 MONEDAS = ["PEN", "USD", "CAD", "AUD", "GBP", "EUR", "ZAR"]
-MON_SAP = {"SOL": "PEN"}
+MON_SAP = reglas.MON
 ESTATUS_CIERRE = {"COMPLETO": "Completo", "ANULADO": "Anulado"}
 
 # Etapas en orden; cada una empieza con la fecha indicada (la más avanzada registrada manda)
@@ -371,16 +372,15 @@ def datos_sap(con, orden):
         contab = [f["contab"] for f in fac if f["contab"]]
         if contab:
             d["recepcion_fact"] = min(contab)
-        # Pagada: estado Pagado, o un saldo menor que es solo diferencia de montos
-        saldada = lambda f: f["estado"] == "Pagado" or (f.get("pendiente") is not None and f["pendiente"] <= SALDO_MENOR)
-        pagadas = [f for f in fac if saldada(f) and f["fecha_pago"]]
+        # Saldada: Pagado (aunque SAP no traiga la fecha de pago) o con un saldo residual (reglas.py)
+        pagadas = [f for f in fac if reglas.saldada(f["estado"], f.get("pendiente"), oc["mon"])]
         facturado = sum(f["monto"] or 0 for f in fac)
-        # «Cerrado» con nota de entrada solo dice que se recibió todo: para estar completa debe estar facturada
-        completa = oc["estado"] == "Cerrado" and not nota or bool(oc["total"]) and (
-            facturado >= 0.995 * oc["total"] or oc["total"] - facturado <= SALDO_MENOR)
-        # Fecha de pago: todas las facturas pagadas Y la orden cerrada o facturada al 100 % (si no, es un pago parcial)
+        completa = reglas.oc_completa(oc["estado"], nota, oc["total"], facturado, oc["mon"])
+        # Fecha de pago: todas las facturas saldadas Y la orden cerrada o facturada al 100 % (si no, es un pago parcial)
         if len(pagadas) == len(fac) and completa:
-            d["fecha_pago"] = max(f["fecha_pago"] for f in pagadas)
+            fechas = [f["fecha_pago"] for f in pagadas if f["fecha_pago"]]
+            # Pagada sin fecha de pago en SAP: se toma la fecha de contabilización como referencia
+            d["fecha_pago"] = max(fechas) if fechas else max((f["contab"] or f["emision"] or "" for f in fac), default="")
         elif len(pagadas) == len(fac):
             d["sin_pago"] = "pago parcial: la OC sigue en proceso y no está facturada al 100 %"
         else:
@@ -403,8 +403,7 @@ CAMPOS_SAP = ["emision_oc", "aprob_oc", "proveedor", "monto", "moneda", "num_fac
 # Vinculados: si la orden está en SAP, SAP manda siempre (lo aprobado en SAP es lo correcto).
 # Excepción: el monto de una OC que comparten varios requerimientos (el total SAP es de la orden completa).
 CAMPOS_VINCULADOS = ["monto", "moneda"]
-# Saldo (en la moneda de la OC / factura) que se considera diferencia de montos y no un pendiente real
-SALDO_MENOR = 10.0
+# Saldo que se considera diferencia de montos: ver reglas.SALDO_MENOR (por moneda)
 
 
 def _distinto(campo, a, b):
@@ -625,22 +624,25 @@ def estado_pago(con, orden):
         "SELECT * FROM facturas WHERE numero_oc=? AND situacion='Vigente' ORDER BY emision", (int(orden),))]
     mon, total = MON_SAP.get(oc["mon"], oc["mon"]), oc["total"] or 0
     facturado = sum(f["ft_sin_imp"] or 0 for f in fac)
-    saldo = sum(max(f["imp_pendiente"] or 0, 0) for f in fac if f["estado_factura"] != "Pagado")
+    # Por pagar: no saldadas (las «sin estado» solo si tienen un saldo mayor al residual)
+    abiertas = [f for f in fac if not reglas.saldada(f["estado_factura"], f["imp_pendiente"], f["mon"])
+                and (f["estado_factura"] or (f["imp_pendiente"] or 0) > reglas.umbral(f["mon"]))]
+    residual = sum(max(f["imp_pendiente"] or 0, 0) for f in fac
+                   if reglas.estado_factura(f["estado_factura"], f["imp_pendiente"], f["mon"]) == reglas.RESIDUAL)
+    saldo = sum(max(f["imp_pendiente"] or 0, 0) for f in abiertas)
     pagos = [f["fecha_pago"] for f in fac if f["fecha_pago"]]
     cifras = {"moneda": mon, "total": total, "facturado": facturado, "pct": facturado / total if total else None,
               "saldo": saldo, "ultimo_pago": max(pagos) if pagos else "", "estado_oc": oc["estado"], "n_fact": len(fac),
               "proveedor": oc["proveedor"], "fecha_oc": oc["fecha"], "vence": "", "vencidas": 0}
     hoy = date.today().isoformat()
-    pend = [f for f in fac if f["estado_factura"] != "Pagado" and (f["imp_pendiente"] or 0) > SALDO_MENOR]
+    pend = abiertas
     if pend:
         cifras["vence"] = min((f["vencimiento"] for f in pend if f["vencimiento"]), default="")
         cifras["vencidas"] = sum(1 for f in pend if f["vencimiento"] and f["vencimiento"] < hoy)
     nota = sgm.con_nota_entrada(oc["serie"], oc["estado"], oc["fecha"], oc["ingresado"])
     if oc["estado"] == "Cancelado":
         return "Anulada", "OC cancelada en SAP", cifras
-    if saldo > SALDO_MENOR:
-        hoy = date.today().isoformat()
-        pend = [f for f in fac if f["estado_factura"] != "Pagado" and (f["imp_pendiente"] or 0) > SALDO_MENOR]
+    if abiertas:
         venc = [f for f in pend if f["vencimiento"] and f["vencimiento"] < hoy]
         prox = min((f["vencimiento"] for f in pend if f["vencimiento"] and f["vencimiento"] >= hoy), default="")
         det = f"{len(pend)} factura{'s' if len(pend) > 1 else ''} por pagar: {mon} {saldo:,.2f}"
@@ -652,14 +654,16 @@ def estado_pago(con, orden):
         return "Pendiente de factura", ("Material ingresado (nota de entrada); falta la factura" if nota
                                         else "OC en proceso, aún sin factura"), cifras
     por_facturar = total - facturado
-    if (oc["estado"] != "Cerrado" or nota) and por_facturar > SALDO_MENOR and facturado < 0.995 * total:
+    if not reglas.oc_completa(oc["estado"], nota, total, facturado, oc["mon"]):
         return "Facturación parcial", (f"Facturado {facturado / total:.0%}; falta facturar {mon} {por_facturar:,.2f} "
                                        f"(lo facturado está pagado)"), cifras
     det = (f"{len(fac)} factura{'s' if len(fac) > 1 else ''} pagada{'s' if len(fac) > 1 else ''}"
            + (f" · último pago {fmt(max(pagos))}" if pagos else ""))
-    if saldo > 0.005:
-        det += f" · saldo menor {mon} {saldo:,.2f} (diferencia de montos)"
-    if oc["estado"] == "Cerrado" and abs(por_facturar) > 0.005 and facturado < 0.995 * total:
+    if residual > 0.005:
+        det += f" · saldo residual {mon} {residual:,.2f} (diferencia de montos)"
+    if any(f["estado_factura"] == reglas.PAGADO and not f["fecha_pago"] for f in fac):
+        det += " · SAP no registra la fecha de pago"
+    if oc["estado"] == "Cerrado" and abs(por_facturar) > 0.005 and facturado < (1 - reglas.TOLERANCIA) * total:
         det += f" · OC cerrada con {mon} {por_facturar:,.2f} sin facturar"
     return "Completado", det, cifras
 
@@ -735,7 +739,7 @@ def _hoja_resumen(wb, F, hdr, titulo, sub, filas):
     ws = wb.add_worksheet("RESUMEN")
     ws.hide_gridlines(2)
     ws.write("A1", "Resumen de requerimientos según SAP", titulo)
-    ws.write("A2", f"«Completado» = sin pendientes de pago: facturas pagadas (saldos de hasta {SALDO_MENOR:,.0f} se toman "
+    ws.write("A2", f"«Completado» = sin pendientes de pago: facturas pagadas (saldos de hasta {reglas.texto_umbral()} se toman "
                    f"como diferencia de montos) u OC cerrada sin factura. DÍAS = antigüedad de la OC en lo pendiente. "
                    f"No incluye vuelos. Datos del último reporte SAP cargado.", sub)
     cuenta = {}

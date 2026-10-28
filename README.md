@@ -44,11 +44,29 @@ Reemplaza el llenado manual del Excel «SEGUIMIENTO DE REQUERIMIENTOS Y ORDENES�
   - **PENDIENTES**;
   - **TIEMPOS**: con fórmulas sobre la tabla.
 - **📚 Actualizar catálogos** relee Consulta1 y PROVEEDORES del Excel de seguimiento (ruta guardada en la configuración). Los proyectos se reemplazan por la lista de Consulta1; los proveedores se suman a los que ya había.
-- **📥 Importar desde Excel…** agrega, a nombre de tu comprador, los COD de la tabla CONTROL que todavía no importaste.
+- **📥 Importar desde Excel…** (en **⚙ Más**) agrega, a nombre de tu comprador, los COD de la tabla CONTROL que todavía no importaste.
+- **Acciones rápidas** sobre el requerimiento elegido:
+  - **📅 Registrar hoy**: pone la fecha de hoy en la siguiente etapa, por ejemplo «Envío de orden» o «Recepción de factura».
+  - **✅ Conformidad hoy**: registra la entrega real, para el OTIF.
+- **🔗 OC sin requerimiento** lista tus OC abiertas en SAP que no tienen requerimiento. Con «Crear requerimiento», el formulario se abre con la OC, el proveedor, el monto y el proyecto de SAP ya puestos.
 - Cada requerimiento tiene un **Comprador**. El filtro **Comprador** (arriba, junto a los botones, y en Indicadores) muestra por defecto los tuyos. **📤 Exportar Excel** exporta los del comprador elegido, con su nombre en el archivo.
 
 ## Aplicación «Seguimiento Ordenes.exe» (uso diario)
-Para abrirla, haz doble clic en el `.exe`. No necesita Python. Tarda unos segundos en arrancar.
+Para abrirla, usa el acceso directo **«Seguimiento Ordenes»** del escritorio. Abre la versión instalada en el equipo (`%LOCALAPPDATA%\Programs\Seguimiento Ordenes`):
+- arranca en unos 2 segundos (la primera vez tarda más mientras Windows revisa los archivos);
+- usa la base de esta carpeta, según indica `carpeta_datos.txt` junto a ese `.exe`.
+
+El `Seguimiento Ordenes.exe` de esta carpeta sigue funcionando y sirve para las cargas automáticas (`--cargar`) y para otro usuario. Ninguno de los dos necesita Python.
+
+**Regla de pago única** (`reglas.py`): la app, Consultar OC, los Excel y Power BI deciden igual si algo está pagado.
+- Una factura **Pagado** está saldada aunque SAP no traiga la fecha de pago. En ese caso, el requerimiento toma la fecha de contabilización.
+- Un **saldo residual** de hasta 10 PEN o 3 USD (3 en otras monedas) en una factura «Pendiente de pago» es una diferencia de montos, por ejemplo un redondeo o una detracción ya depositada. Se muestra como «Saldo residual», no cuenta como pendiente ni como vencida y tiene su propio filtro en Facturas.
+
+Los Excel que genera la app van a subcarpetas:
+- **`Controles\`**: control diario.
+- **`Exportes\`**: seguimiento de requerimientos y resumen ejecutivo.
+
+Los que estén sueltos se mueven solos al abrir la app. Las exportaciones corren en segundo plano, sin congelar la ventana.
 
 1. **📥 Cargar CSV de SAP…**: elige los dos reportes de SAP a la vez (con Ctrl). La app reconoce cuál es cuál:
    - **«Control de órdenes»** (CSV o xlsx): es el reporte general. Con él se arma el control del día y el seguimiento.
@@ -120,6 +138,8 @@ Colores de la lista:
 - amarillo: OC sin comentarios;
 - rojo: compromiso vencido;
 - verde: OC facturada.
+
+**Acciones rápidas** (panel de la OC): **📨 Pedí la factura**, **🚚 Factura en camino** y **⏳ Esperando conformidad** cambian el estado de seguimiento y dejan el comentario con un clic. **📅 Compromiso en 7 días** fija la fecha compromiso. Responsable y compromiso ya no se muestran en la lista, pero se editan en el panel. Los totales del encabezado siguen el filtro de comprador.
 
 Si eliges el estado **"Cerrar sin factura"**, la OC deja de estar activa. Úsalo cuando ya sabes que una OC en proceso no se va a facturar, aunque todavía no esté cerrada en SAP.
 
@@ -232,8 +252,16 @@ La configuración de cada usuario (comprador, firma, rutas y plazos) está en `%
 - **REVISAR**: el reporte parecía incompleto y no se aplicó. Cárgalo desde la app para confirmarlo, o agrega `--forzar`.
 - **ERROR**: algo falló; el detalle está en el mismo log.
 
-**Recompilar el .exe** (solo si cambias el código):
-`python -m PyInstaller --onefile --windowed --name "Seguimiento Ordenes" --hidden-import python_calamine app_seguimiento.py`
+**Recompilar** (solo si cambias el código):
+- `.exe` de esta carpeta: `python -m PyInstaller --onefile --windowed --name "Seguimiento Ordenes" --hidden-import python_calamine app_seguimiento.py`
+- Versión rápida:
+  1. Compílala con `--onedir` en lugar de `--onefile`, en una ruta corta. Las rutas largas fallan por el límite de Windows.
+  2. Copia la carpeta resultante a `%LOCALAPPDATA%\Programs\Seguimiento Ordenes`.
+  3. Deja junto al `.exe` un `carpeta_datos.txt` con la ruta de esta carpeta.
+
+**Pruebas:** ejecuta `python pruebas\ejecutar_pruebas.py`.
+- Corre las 10 baterías sobre copias de los datos y no toca la base real.
+- La carpeta `pruebas\` no se sube a Git porque contiene números de OC y proveedores reales.
 
 ## Requisitos (una sola vez)
 - Python 3.12 (instalado en `%LOCALAPPDATA%\Programs\Python\Python312`).

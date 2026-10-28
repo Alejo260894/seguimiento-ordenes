@@ -12,6 +12,7 @@ Hojas:
 import os
 from datetime import date, datetime
 
+import reglas
 import requerimientos as rq
 
 ESTADOS = rq.STATUS_RESUMEN
@@ -185,7 +186,7 @@ def exportar(con, salida, comprador=None):
     total_fil = len(filas)
     panel.merge_range(1, 0, 1, 11, f"  {('Comprador: ' + comprador + ' · ') if comprador else ''}{total_fil} requerimientos "
                                    f"(sin vuelos) · generado el {datetime.now():%d/%m/%Y %H:%M} · «Completado» = sin "
-                                   f"pendientes de pago (saldos de hasta {rq.SALDO_MENOR:,.0f} = diferencia de montos)",
+                                   f"pendientes de pago (saldos de hasta {reglas.texto_umbral()} = diferencia de montos)",
                       F(font_color="#475569", italic=True))
     etiqueta = F(bold=True, font_color=AZUL)
     filtro = F(bg_color="#FEF9C3", border=1, border_color="#CA8A04", bold=True)
