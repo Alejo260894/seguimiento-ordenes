@@ -30,3 +30,4 @@ powerbi/*.SemanticModel/
 
 # Pruebas: contienen números de OC y proveedores reales (quedan solo en la carpeta del proyecto)
 pruebas/
+Publicacion LinkedIn/
